@@ -1,0 +1,28 @@
+{
+  "name": "midi-voyager-windows",
+  "version": "1.0.1",
+  "private": true,
+  "description": "A clean-room Windows MIDI workstation inspired by the supplied Android application.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check src/app.js && node --check src/audio-engine.js && node --check src/midi-model.js && node --check src/visualizer.js"
+  },
+  "dependencies": {
+    "generaluser": "1.47.1",
+    "midi-file": "1.2.4",
+    "spessasynth_core": "4.3.16",
+    "spessasynth_lib": "4.3.12"
+  },
+  "devDependencies": {
+    "@webviewjs/webview": "0.4.1",
+    "esbuild": "0.25.9",
+    "fflate": "^0.8.2",
+    "resedit": "3.0.2"
+  },
+  "optionalDependencies": {
+    "@webviewjs/webview-win32-x64-msvc": "0.4.1",
+    "node-win-x64": "24.18.1"
+  }
+}

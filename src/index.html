@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>MIDI Voyager Windows</title>
+  <link rel="stylesheet" href="./styles.css?v=1.0.1">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="titlebar">
+      <div class="brand" title="MIDI Voyager Windows">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        <div class="brand-copy"><strong>MIDI Voyager</strong><small>WINDOWS</small></div>
+      </div>
+      <button id="open-midi" class="button primary" type="button"><span class="button-icon">＋</span> Open MIDI</button>
+      <div class="file-heading">
+        <div id="file-title" class="file-title">No file loaded</div>
+        <div id="file-subtitle" class="file-subtitle">Drop .mid, .midi, .kar, .rmi or .xmf anywhere</div>
+      </div>
+      <div id="view-switcher" class="segmented view-switcher" aria-label="Visualisation mode"></div>
+      <button id="perspective-button" class="icon-button wide" type="button" title="Perspective"><span>◫</span><em id="perspective-label">Performance</em></button>
+      <button id="soundfont-button" class="icon-button" type="button" title="SoundFonts">SF</button>
+      <button id="midi-devices-button" class="icon-button" type="button" title="MIDI devices">⌁</button>
+      <button id="settings-button" class="icon-button" type="button" title="Settings">⚙</button>
+    </header>
+
+    <div class="work-area">
+      <aside id="library-sidebar" class="library-sidebar">
+        <div class="sidebar-tabs">
+          <button class="sidebar-tab active" data-sidebar-tab="recent" type="button">Recent</button>
+          <button class="sidebar-tab" data-sidebar-tab="playlists" type="button">Playlists</button>
+        </div>
+        <section id="recent-pane" class="sidebar-pane active">
+          <div class="sidebar-heading"><span>Recently opened</span><button id="open-multiple" class="tiny-button" title="Open several files" type="button">＋</button></div>
+          <div id="recent-list" class="file-list"></div>
+        </section>
+        <section id="playlists-pane" class="sidebar-pane">
+          <div class="sidebar-heading"><span>Your playlists</span><button id="new-playlist" class="tiny-button" title="New playlist" type="button">＋</button></div>
+          <div id="playlist-list" class="playlist-list"></div>
+          <div id="playlist-detail" class="playlist-detail"></div>
+        </section>
+        <div class="sidebar-footer">
+          <button id="demo-button" class="text-button" type="button">Load built-in demo</button>
+        </div>
+      </aside>
+
+      <main class="main-stage">
+        <section id="visual-shell" class="visual-shell">
+          <canvas id="visualizer" aria-label="MIDI visualisation"></canvas>
+          <div id="visual-overlay" class="visual-overlay" hidden></div>
+          <div class="visual-toolbar">
+            <div class="status-pills">
+              <span id="signature-pill" class="status-pill">4/4</span>
+              <span id="key-pill" class="status-pill">Key —</span>
+              <span id="voice-pill" class="status-pill">0 voices</span>
+            </div>
+            <div class="visual-actions">
+              <label class="compact-select"><span>Colour</span><select id="color-mode">
+                <option value="track">Track</option>
+                <option value="channel">Channel</option>
+                <option value="pitch">Pitch</option>
+                <option value="velocity">Velocity</option>
+                <option value="out-of-key">Out of key</option>
+              </select></label>
+              <button id="zoom-out" class="floating-button" type="button" title="Zoom out">−</button>
+              <button id="zoom-reset" class="floating-button zoom-label" type="button" title="Reset zoom">100%</button>
+              <button id="zoom-in" class="floating-button" type="button" title="Zoom in">＋</button>
+              <button id="fullscreen-button" class="floating-button" type="button" title="Fullscreen">⛶</button>
+            </div>
+          </div>
+          <div id="drop-hint" class="drop-hint"><strong>Drop files to open</strong><span>MIDI, KAR, SoundFont, DLS</span></div>
+        </section>
+
+        <section id="detail-panel" class="detail-panel">
+          <div class="detail-tabs">
+            <button class="detail-tab active" data-detail-tab="mixer" type="button">Mixer</button>
+            <button class="detail-tab" data-detail-tab="chords" type="button">Chords</button>
+            <button class="detail-tab" data-detail-tab="lyrics" type="button">Lyrics</button>
+            <button class="detail-tab" data-detail-tab="markers" type="button">Markers & loops</button>
+            <button class="detail-tab" data-detail-tab="info" type="button">File info</button>
+            <button id="collapse-detail" class="detail-collapse" type="button" title="Collapse panel">⌄</button>
+          </div>
+          <div id="mixer-panel" class="detail-content active"><div id="mixer-list" class="mixer-list"></div></div>
+          <div id="chords-panel" class="detail-content"><div id="chord-strip" class="chord-strip"></div></div>
+          <div id="lyrics-panel" class="detail-content"><div id="lyrics-list" class="lyrics-list"></div></div>
+          <div id="markers-panel" class="detail-content marker-layout">
+            <div class="loop-editor">
+              <div class="panel-heading">Loop region</div>
+              <button id="loop-set-start" class="button small" type="button">Set start</button>
+              <span id="loop-start-label" class="time-code">0:00</span>
+              <button id="loop-set-end" class="button small" type="button">Set end</button>
+              <span id="loop-end-label" class="time-code">0:00</span>
+              <button id="loop-clear" class="button ghost small" type="button">Clear</button>
+            </div>
+            <div class="marker-editor">
+              <div class="panel-heading">Markers</div>
+              <button id="add-marker" class="button small" type="button">＋ Add at cursor</button>
+              <div id="marker-list" class="marker-list"></div>
+            </div>
+          </div>
+          <div id="info-panel" class="detail-content"><div id="file-info" class="file-info-grid"></div></div>
+        </section>
+      </main>
+    </div>
+
+    <footer class="transport">
+      <div class="transport-buttons">
+        <button id="previous-button" class="transport-button" type="button" title="Previous in playlist">◀|</button>
+        <button id="rewind-button" class="transport-button" type="button" title="Back 10 seconds">−10</button>
+        <button id="play-button" class="play-button" type="button" title="Play / pause">▶</button>
+        <button id="stop-button" class="transport-button" type="button" title="Stop">■</button>
+        <button id="forward-button" class="transport-button" type="button" title="Forward 10 seconds">+10</button>
+        <button id="next-button" class="transport-button" type="button" title="Next in playlist">|▶</button>
+      </div>
+      <span id="current-time" class="transport-time">0:00</span>
+      <div class="seek-wrap">
+        <input id="seek" class="range seek" type="range" min="0" max="1" step="0.001" value="0" aria-label="Playback position">
+        <div id="seek-markers" class="seek-markers"></div>
+      </div>
+      <span id="duration-time" class="transport-time dim">0:00</span>
+      <button id="loop-button" class="toggle-button" type="button" title="Loop region">↻</button>
+      <button id="metronome-button" class="toggle-button" type="button" title="Metronome">♩</button>
+      <div class="transport-control">
+        <span>Tempo</span>
+        <button id="tempo-down" class="step-button" type="button">−</button>
+        <button id="tempo-value" class="value-button" type="button" title="Reset tempo">100%</button>
+        <button id="tempo-up" class="step-button" type="button">＋</button>
+      </div>
+      <div class="transport-control">
+        <span>Pitch</span>
+        <button id="pitch-down" class="step-button" type="button">−</button>
+        <button id="pitch-value" class="value-button" type="button" title="Reset pitch">0</button>
+        <button id="pitch-up" class="step-button" type="button">＋</button>
+      </div>
+      <div class="transport-control volume-control">
+        <span>Vol</span><span class="speaker">◖</span>
+        <input id="master-volume" class="range volume" type="range" min="0" max="1.25" step="0.01" value="0.82" aria-label="Master volume">
+      </div>
+      <button id="export-button" class="button accent" type="button">Export</button>
+    </footer>
+  </div>
+
+  <input id="midi-file-input" type="file" accept=".mid,.midi,.kar,.rmi,.rmid,.xmf,audio/midi,audio/x-midi" multiple hidden>
+  <input id="soundfont-file-input" type="file" accept=".sf2,.sf3,.dls,.sf2pack" multiple hidden>
+  <input id="settings-file-input" type="file" accept=".json,.mvs" hidden>
+
+  <dialog id="settings-dialog" class="modal">
+    <form method="dialog" class="modal-card wide-modal">
+      <header><div><small>PREFERENCES</small><h2>Settings</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
+      <div class="settings-grid">
+        <nav class="settings-nav">
+          <button class="settings-nav-item active" data-settings-page="playback" type="button">Playback</button>
+          <button class="settings-nav-item" data-settings-page="visualisation" type="button">Visualisation</button>
+          <button class="settings-nav-item" data-settings-page="karaoke" type="button">Karaoke</button>
+          <button class="settings-nav-item" data-settings-page="library" type="button">Library & backup</button>
+          <button class="settings-nav-item" data-settings-page="about" type="button">About</button>
+        </nav>
+        <div class="settings-pages">
+          <section class="settings-page active" data-settings-content="playback">
+            <h3>Playback</h3>
+            <label class="setting-row"><span><strong>Count-in</strong><small>Metronome beats before playback begins</small></span><select id="count-in-setting"><option value="0">Off</option><option value="1">1 beat</option><option value="2">2 beats</option><option value="4">1 bar (4 beats)</option></select></label>
+            <label class="setting-row"><span><strong>Maximum tempo</strong><small>Upper limit used by the tempo controls</small></span><select id="max-tempo-setting"><option value="2">200%</option><option value="3">300%</option><option value="4">400%</option></select></label>
+            <label class="setting-row"><span><strong>Skip silence at start</strong><small>Jump to the first audible note</small></span><input id="skip-silence-setting" type="checkbox"></label>
+            <label class="setting-row"><span><strong>MIDI output only</strong><small>When an external output is selected, mute internal synthesis</small></span><input id="midi-output-only-setting" type="checkbox" checked></label>
+          </section>
+          <section class="settings-page" data-settings-content="visualisation">
+            <h3>Visualisation</h3>
+            <label class="setting-row"><span><strong>Piano keyboard</strong><small>Show the playable keyboard in waterfall mode</small></span><input id="show-piano-setting" type="checkbox" checked></label>
+            <label class="setting-row"><span><strong>Note labels</strong><small>Show note names when there is enough room</small></span><input id="show-labels-setting" type="checkbox" checked></label>
+            <label class="setting-row"><span><strong>Beat grid</strong><small>Draw measure and beat guides</small></span><input id="show-grid-setting" type="checkbox" checked></label>
+            <label class="setting-row"><span><strong>Theme</strong><small>Application colour treatment</small></span><select id="theme-setting"><option value="midnight">Midnight cyan</option><option value="violet">Violet studio</option><option value="graphite">Graphite</option></select></label>
+          </section>
+          <section class="settings-page" data-settings-content="karaoke">
+            <h3>Karaoke</h3>
+            <label class="setting-row"><span><strong>Upcoming text colour</strong><small>Colour used for the next lyric line</small></span><select id="karaoke-color-setting"><option value="gray">Soft gray</option><option value="white">White</option><option value="cyan">Cyan</option></select></label>
+            <label class="setting-row"><span><strong>Maximum word length</strong><small>Hide technical metadata masquerading as lyrics</small></span><input id="karaoke-length-setting" type="number" min="10" max="200" value="80"></label>
+          </section>
+          <section class="settings-page" data-settings-content="library">
+            <h3>Library & backup</h3>
+            <p class="settings-copy">Per-file tempo, pitch, mixer, marker and loop changes are remembered automatically without modifying the original MIDI.</p>
+            <div class="button-row"><button id="export-settings" class="button" type="button">Export settings</button><button id="import-settings" class="button ghost" type="button">Import settings</button></div>
+          </section>
+          <section class="settings-page" data-settings-content="about">
+            <h3>MIDI Voyager Windows 1.0</h3>
+            <p class="settings-copy">A clean-room Windows edition built for fast local MIDI playback and visualisation. Audio synthesis runs off the interface thread and uses the included GeneralUser GS SoundFont.</p>
+            <p class="settings-copy">Supports MIDI formats 0, 1 and 2, KAR lyrics, RMIDI/XMF parsing, SF2/SF3/DLS sound banks, GS/XG messages, Web MIDI input/output and offline WAV rendering.</p>
+          </section>
+        </div>
+      </div>
+      <footer><button class="button primary" value="default">Done</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="soundfont-dialog" class="modal">
+    <form method="dialog" class="modal-card">
+      <header><div><small>SOUND ENGINE</small><h2>SoundFonts</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
+      <p class="modal-copy">Stack SF2, SF3 or DLS sound banks. Higher entries take priority; the bundled GeneralUser GS bank remains as a fallback.</p>
+      <div id="soundfont-list" class="soundfont-list"></div>
+      <div class="button-row"><button id="add-soundfont" class="button primary" type="button">＋ Add SoundFont</button></div>
+      <footer><button class="button" value="default">Close</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="midi-dialog" class="modal">
+    <form method="dialog" class="modal-card">
+      <header><div><small>HARDWARE</small><h2>MIDI devices</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
+      <p id="midi-status" class="modal-copy">Connect a USB MIDI keyboard or output device, then scan.</p>
+      <label class="dialog-field"><span>MIDI input</span><select id="midi-input-select"><option value="">None</option></select></label>
+      <label class="dialog-field"><span>MIDI output</span><select id="midi-output-select"><option value="">Internal SoundFont</option></select></label>
+      <div class="button-row"><button id="scan-midi" class="button primary" type="button">Scan devices</button></div>
+      <footer><button class="button" value="default">Close</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="perspective-dialog" class="modal compact-modal">
+    <form method="dialog" class="modal-card">
+      <header><div><small>LAYOUT</small><h2>Perspectives</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
+      <div id="perspective-list" class="perspective-list"></div>
+      <div class="button-row"><button id="save-perspective" class="button ghost" type="button">Save current layout</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="export-dialog" class="modal compact-modal">
+    <form method="dialog" class="modal-card">
+      <header><div><small>EXPORT</small><h2>Create a new file</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
+      <button id="export-midi" class="export-choice" type="button"><strong>Modified MIDI</strong><span>Tempo-independent pitch, instruments, mixer settings and markers</span><em>.mid</em></button>
+      <button id="export-wav" class="export-choice" type="button"><strong>Rendered audio</strong><span>Full-quality SoundFont playback with current tempo and mix</span><em>.wav</em></button>
+      <button id="export-lyrics" class="export-choice" type="button"><strong>Lyrics & chords</strong><span>Plain text cue sheet for the loaded song</span><em>.txt</em></button>
+      <div id="export-progress" class="export-progress" hidden><div><span></span></div><small>Preparing audio…</small></div>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script type="module" src="./app.js?v=1.0.1"></script>
+</body>
+</html>
