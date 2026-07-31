@@ -46,5 +46,3 @@ SFZ import and Android-only integrations are not included in this first Windows 
 ## Build from source
 
 Install Node.js 24 or later, run `npm install`, then `npm test` and `npm run build`. The package includes a prebuilt open-source launcher for Windows builds; GNU binutils can rebuild that launcher from `packaging/launcher.S` and the `.def` files.
-
-This port does not copy executable code, branding assets, or bundled audio assets from the supplied APK. Third-party components and their licences are listed in `THIRD-PARTY-NOTICES.txt` in the portable package.
