@@ -1,0 +1,31 @@
+MIDI Voyager Windows — Third-party notices
+============================================
+
+The release package contains the following independently licensed components.
+Their complete licence files are included in the Licences folder.
+
+SpessaSynth Core 4.3.16 and SpessaSynth Library 4.3.12
+  Copyright contributors to SpessaSynth
+  Apache License 2.0
+
+midi-file 1.2.4
+  Copyright (c) Matt Diamond and contributors
+  MIT License
+
+WebViewJS 0.4.1
+  Copyright WebViewJS contributors
+  MIT License
+
+GeneralUser GS 1.471
+  Created by S. Christian Collins
+  The author permits use in software projects and redistribution. See the
+  included GeneralUser-GS-LICENSE.txt for the full terms and sample notice.
+
+Node.js 24.18.1 LTS runtime
+  Copyright Node.js contributors
+  MIT License. Node.js also contains third-party dependencies; see
+  https://github.com/nodejs/node/blob/v24.18.1/LICENSE for the upstream notices.
+
+Microsoft Edge WebView2
+  The runtime is supplied by Windows/Microsoft and is not redistributed in
+  this package. Its use is governed by Microsoft's runtime terms.
