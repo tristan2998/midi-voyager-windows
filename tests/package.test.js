@@ -11,7 +11,7 @@ test('desktop UI and native host retain the required integration points', async 
   for (const id of ['open-midi', 'view-switcher', 'mixer-list', 'lyrics-list', 'export-wav', 'soundfont-file-input']) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
-  assert.match(html, /app\.js\?v=1\.0\.1/);
+  assert.match(html, /app\.js\?v=1\.0\.2/);
   assert.match(app, /new AudioEngine/);
   assert.match(app, /createDemoMIDI/);
   assert.match(host, /registerProtocol\('app'/);

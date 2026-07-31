@@ -6,8 +6,14 @@ import {
   formatTime
 } from './constants.js';
 import { chordAt, keyPitchClasses } from './chords.js';
-
-const BLACK_KEYS = new Set([1, 3, 6, 8, 10]);
+import {
+  BLACK_KEY_HEIGHT_RATIO,
+  PIANO_AREA_HEIGHT,
+  createPianoLayout,
+  isBlackPianoKey,
+  pianoPitchAt,
+  visiblePianoRange
+} from './piano-layout.js';
 
 function withAlpha(hex, alpha) {
   const value = hex.replace('#', '');
@@ -110,15 +116,7 @@ export class Visualizer {
   }
 
   _range() {
-    const sourceMin = Math.min(60, this.model.noteRange.min);
-    const sourceMax = Math.max(72, this.model.noteRange.max);
-    const total = clamp(Math.ceil((sourceMax - sourceMin + 12) / this.zoom), 18, 88);
-    const center = clamp((sourceMin + sourceMax) / 2, 36, 84);
-    let min = Math.floor(center - total / 2);
-    let max = min + total;
-    if (min < 0) { max -= min; min = 0; }
-    if (max > 127) { min -= max - 127; max = 127; }
-    return { min, max, count: max - min + 1 };
+    return visiblePianoRange(this.model.noteRange, this.zoom);
   }
 
   _noteColor(note) {
@@ -143,50 +141,58 @@ export class Visualizer {
   }
 
   _drawWaterfall(ctx, width, height, time) {
-    const pianoHeight = this.showPiano ? 88 : 0;
-    const playY = height - pianoHeight - 28;
+    const pianoHeight = this.showPiano ? PIANO_AREA_HEIGHT : 0;
+    const playY = height - pianoHeight;
     const range = this._range();
-    const keyWidth = width / range.count;
+    const pianoLayout = createPianoLayout(range.min, range.max, width);
     const secondsAhead = clamp(8 / Math.sqrt(this.zoom), 1.5, 16);
     const secondsBehind = 0.65;
 
     if (this.showGrid) this._drawWaterfallGrid(ctx, width, playY, time, secondsAhead);
     const notes = this.model.notesInRange(time - secondsBehind, time + secondsAhead, 25_000);
     const dense = notes.length > 9000;
-    for (const note of notes) {
-      if (note.pitch < range.min || note.pitch > range.max || this._isMuted(note)) continue;
-      const x = (note.pitch - range.min) * keyWidth + 1;
-      const yStart = playY - (note.start - time) / secondsAhead * playY;
-      const yEnd = playY - (note.end - time) / secondsAhead * playY;
-      const top = Math.min(yStart, yEnd);
-      const bottom = Math.max(yStart, yEnd);
-      const color = this._noteColor(note);
-      const active = note.start <= time && note.end >= time;
-      if (active && !dense) {
-        ctx.shadowBlur = 14;
-        ctx.shadowColor = color;
+    const drawNotes = (blackPass) => {
+      for (const note of notes) {
+        if (isBlackPianoKey(note.pitch) !== blackPass || note.pitch < range.min || note.pitch > range.max || this._isMuted(note)) continue;
+        const key = pianoLayout.byPitch.get(note.pitch);
+        if (!key) continue;
+        const inset = Math.min(1.5, key.width * 0.08);
+        const x = key.x + inset;
+        const noteWidth = Math.max(1, key.width - inset * 2);
+        const yStart = playY - (note.start - time) / secondsAhead * playY;
+        const yEnd = playY - (note.end - time) / secondsAhead * playY;
+        const top = Math.min(yStart, yEnd);
+        const bottom = Math.max(yStart, yEnd);
+        const color = this._noteColor(note);
+        const active = note.start <= time && note.end >= time;
+        if (active && !dense) {
+          ctx.shadowBlur = 14;
+          ctx.shadowColor = color;
+        }
+        ctx.fillStyle = dense ? withAlpha(color, 0.42) : color;
+        ctx.fillRect(x, top, noteWidth, Math.max(dense ? 1 : 3, bottom - top));
+        ctx.shadowBlur = 0;
+        if (this.showLabels && !dense && noteWidth > 24 && bottom - top > 18) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x, top, noteWidth, bottom - top);
+          ctx.clip();
+          ctx.fillStyle = 'rgba(0,0,0,.68)';
+          ctx.font = '10px "Segoe UI", sans-serif';
+          ctx.fillText(midiNoteName(note.pitch), x + 3, top + 12);
+          ctx.restore();
+        }
       }
-      ctx.fillStyle = dense ? withAlpha(color, 0.42) : color;
-      ctx.fillRect(x, top, Math.max(1, keyWidth - 2), Math.max(dense ? 1 : 3, bottom - top));
-      ctx.shadowBlur = 0;
-      if (this.showLabels && !dense && keyWidth > 24 && bottom - top > 18) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x, top, keyWidth - 2, bottom - top);
-        ctx.clip();
-        ctx.fillStyle = 'rgba(0,0,0,.68)';
-        ctx.font = '10px "Segoe UI", sans-serif';
-        ctx.fillText(midiNoteName(note.pitch), x + 3, top + 12);
-        ctx.restore();
-      }
-    }
+    };
+    drawNotes(false);
+    drawNotes(true);
 
     ctx.fillStyle = '#ffffff';
     ctx.shadowBlur = 12;
     ctx.shadowColor = '#58e6ff';
     ctx.fillRect(0, playY, width, 2);
     ctx.shadowBlur = 0;
-    if (this.showPiano) this._drawPiano(ctx, width, height, range, keyWidth, playY + 3);
+    if (this.showPiano) this._drawPiano(ctx, height, pianoLayout, playY + 3);
     this._drawHUD(ctx, width, time);
   }
 
@@ -210,31 +216,25 @@ export class Visualizer {
     }
   }
 
-  _drawPiano(ctx, width, height, range, keyWidth, top) {
+  _drawPiano(ctx, height, layout, top) {
     ctx.fillStyle = '#dce7ee';
-    ctx.fillRect(0, top, width, height - top);
-    for (let pitch = range.min; pitch <= range.max; pitch += 1) {
-      const x = (pitch - range.min) * keyWidth;
-      const black = BLACK_KEYS.has(pitch % 12);
-      const active = this.activeNotes[pitch] || false;
-      if (!black) {
-        ctx.fillStyle = active ? PITCH_CLASS_COLORS[pitch % 12] : ((pitch % 12 === 0) ? '#f8fcff' : '#e7eef3');
-        ctx.fillRect(x + 0.5, top, Math.max(1, keyWidth - 1), height - top);
-        ctx.strokeStyle = '#73808c';
-        ctx.strokeRect(x + 0.5, top, Math.max(1, keyWidth - 1), height - top);
-        if (keyWidth > 25 && pitch % 12 === 0) {
-          ctx.fillStyle = '#34434e';
-          ctx.font = '10px "Segoe UI", sans-serif';
-          ctx.textAlign = 'center';
-          ctx.fillText(midiNoteName(pitch), x + keyWidth / 2, height - 8);
-        }
+    ctx.fillRect(0, top, layout.width, height - top);
+    for (const key of layout.whiteKeys) {
+      const active = this.activeNotes[key.pitch] || false;
+      ctx.fillStyle = active ? PITCH_CLASS_COLORS[key.pitch % 12] : ((key.pitch % 12 === 0) ? '#f8fcff' : '#e7eef3');
+      ctx.fillRect(key.x + 0.5, top, Math.max(1, key.width - 1), height - top);
+      ctx.strokeStyle = '#73808c';
+      ctx.strokeRect(key.x + 0.5, top, Math.max(1, key.width - 1), height - top);
+      if (layout.whiteKeyWidth > 25 && key.pitch % 12 === 0) {
+        ctx.fillStyle = '#34434e';
+        ctx.font = '10px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(midiNoteName(key.pitch), key.center, height - 8);
       }
     }
-    for (let pitch = range.min; pitch <= range.max; pitch += 1) {
-      if (!BLACK_KEYS.has(pitch % 12)) continue;
-      const x = (pitch - range.min) * keyWidth;
-      ctx.fillStyle = this.activeNotes[pitch] ? PITCH_CLASS_COLORS[pitch % 12] : '#111923';
-      ctx.fillRect(x - keyWidth * 0.22, top, keyWidth * 0.66, (height - top) * 0.62);
+    for (const key of layout.blackKeys) {
+      ctx.fillStyle = this.activeNotes[key.pitch] ? PITCH_CLASS_COLORS[key.pitch % 12] : '#111923';
+      ctx.fillRect(key.x, top, key.width, (height - top) * BLACK_KEY_HEIGHT_RATIO);
     }
     ctx.textAlign = 'left';
   }
@@ -249,7 +249,7 @@ export class Visualizer {
 
     for (let pitch = range.min; pitch <= range.max; pitch += 1) {
       const y = height - (pitch - range.min + 1) * noteHeight;
-      ctx.fillStyle = BLACK_KEYS.has(pitch % 12) ? 'rgba(255,255,255,.025)' : 'rgba(255,255,255,.052)';
+      ctx.fillStyle = isBlackPianoKey(pitch) ? 'rgba(255,255,255,.025)' : 'rgba(255,255,255,.052)';
       ctx.fillRect(0, y, width, noteHeight - 0.5);
       if (pitch % 12 === 0) {
         ctx.fillStyle = '#60758b';
@@ -445,11 +445,11 @@ export class Visualizer {
     const rect = this.canvas.getBoundingClientRect();
     const x = clientX - rect.left;
     const y = clientY - rect.top;
-    const pianoTop = rect.height - 85;
+    const pianoTop = rect.height - PIANO_AREA_HEIGHT + 3;
     if (y < pianoTop) return null;
     const range = this._range();
-    const keyWidth = rect.width / range.count;
-    return clamp(range.min + Math.floor(x / keyWidth), 0, 127);
+    const layout = createPianoLayout(range.min, range.max, rect.width);
+    return pianoPitchAt(layout, x, y - pianoTop, rect.height - pianoTop);
   }
 
   destroy() {

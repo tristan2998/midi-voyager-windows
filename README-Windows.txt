@@ -1,7 +1,8 @@
-MIDI VOYAGER WINDOWS 1.0.1 (64-bit portable)
+MIDI VOYAGER WINDOWS 1.0.2 (64-bit portable)
 ================================================
 
-Version 1.0.1 fixes MIDI and SoundFont imports from the Windows file dialog.
+Version 1.0.2 corrects the waterfall piano layout, falling-note alignment and
+mouse hit-testing. Version 1.0.1 fixed MIDI and SoundFont file-dialog imports.
 
 START
   1. Extract this entire folder from the ZIP.
