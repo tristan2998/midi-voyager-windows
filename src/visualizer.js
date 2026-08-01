@@ -21,6 +21,11 @@ function withAlpha(hex, alpha) {
   return `rgba(${number >> 16}, ${(number >> 8) & 255}, ${number & 255}, ${alpha})`;
 }
 
+export function activePianoKeyColor(pitch, noteColors, activeNotes = []) {
+  if (noteColors?.has?.(pitch)) return noteColors.get(pitch);
+  return activeNotes[pitch] ? PITCH_CLASS_COLORS[pitch % 12] : null;
+}
+
 export class Visualizer {
   constructor(canvas, overlay) {
     this.canvas = canvas;
@@ -151,6 +156,7 @@ export class Visualizer {
     if (this.showGrid) this._drawWaterfallGrid(ctx, width, playY, time, secondsAhead);
     const notes = this.model.notesInRange(time - secondsBehind, time + secondsAhead, 25_000);
     const dense = notes.length > 9000;
+    const activeKeyColors = new Map();
     const drawNotes = (blackPass) => {
       for (const note of notes) {
         if (isBlackPianoKey(note.pitch) !== blackPass || note.pitch < range.min || note.pitch > range.max || this._isMuted(note)) continue;
@@ -165,6 +171,7 @@ export class Visualizer {
         const bottom = Math.max(yStart, yEnd);
         const color = this._noteColor(note);
         const active = note.start <= time && note.end >= time;
+        if (active) activeKeyColors.set(note.pitch, color);
         if (active && !dense) {
           ctx.shadowBlur = 14;
           ctx.shadowColor = color;
@@ -184,15 +191,20 @@ export class Visualizer {
         }
       }
     };
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, width, playY);
+    ctx.clip();
     drawNotes(false);
     drawNotes(true);
+    ctx.restore();
 
     ctx.fillStyle = '#ffffff';
     ctx.shadowBlur = 12;
     ctx.shadowColor = '#58e6ff';
     ctx.fillRect(0, playY, width, 2);
     ctx.shadowBlur = 0;
-    if (this.showPiano) this._drawPiano(ctx, height, pianoLayout, playY + 3);
+    if (this.showPiano) this._drawPiano(ctx, height, pianoLayout, playY + 3, activeKeyColors);
     this._drawHUD(ctx, width, time);
   }
 
@@ -216,12 +228,12 @@ export class Visualizer {
     }
   }
 
-  _drawPiano(ctx, height, layout, top) {
+  _drawPiano(ctx, height, layout, top, activeKeyColors = new Map()) {
     ctx.fillStyle = '#dce7ee';
     ctx.fillRect(0, top, layout.width, height - top);
     for (const key of layout.whiteKeys) {
-      const active = this.activeNotes[key.pitch] || false;
-      ctx.fillStyle = active ? PITCH_CLASS_COLORS[key.pitch % 12] : ((key.pitch % 12 === 0) ? '#f8fcff' : '#e7eef3');
+      const activeColor = activePianoKeyColor(key.pitch, activeKeyColors, this.activeNotes);
+      ctx.fillStyle = activeColor || ((key.pitch % 12 === 0) ? '#f8fcff' : '#e7eef3');
       ctx.fillRect(key.x + 0.5, top, Math.max(1, key.width - 1), height - top);
       ctx.strokeStyle = '#73808c';
       ctx.strokeRect(key.x + 0.5, top, Math.max(1, key.width - 1), height - top);
@@ -233,7 +245,7 @@ export class Visualizer {
       }
     }
     for (const key of layout.blackKeys) {
-      ctx.fillStyle = this.activeNotes[key.pitch] ? PITCH_CLASS_COLORS[key.pitch % 12] : '#111923';
+      ctx.fillStyle = activePianoKeyColor(key.pitch, activeKeyColors, this.activeNotes) || '#111923';
       ctx.fillRect(key.x, top, key.width, (height - top) * BLACK_KEY_HEIGHT_RATIO);
     }
     ctx.textAlign = 'left';

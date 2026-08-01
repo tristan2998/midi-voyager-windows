@@ -2,11 +2,11 @@ import { build as bundle } from 'esbuild';
 import { unzipSync, zipSync } from 'fflate';
 import * as PELibrary from 'pe-library';
 import * as ResEdit from 'resedit';
-import { deflateSync } from 'node:zlib';
+import { gzipSync } from 'node:zlib';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  access, copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile
+  access, appendFile, copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile
 } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,11 +17,13 @@ const uiBuild = join(buildRoot, 'ui');
 const releaseRoot = join(root, 'release');
 const portableName = 'MIDI Voyager Windows';
 const portableRoot = join(releaseRoot, portableName);
-const appVersion = '1.0.2';
+const appVersion = '1.1.1';
 const portableZipName = `${portableName} ${appVersion} x64.zip`;
+const installerName = `${portableName} Setup ${appVersion}.exe`;
 const sourceZipName = `${portableName} Source ${appVersion}.zip`;
 const sourceFolderName = `${portableName} Source`;
 const vendorPackRoot = resolve(root, '..', 'vendor_packs');
+const installerPayloadMarker = 'MIDI_VOYAGER_WINDOWS_PAYLOAD_7D25A16F_END';
 
 async function exists(filePath) {
   try { await access(filePath); return true; } catch { return false; }
@@ -35,103 +37,13 @@ function run(command, args, options = {}) {
   execFileSync(command, args, { stdio: 'inherit', ...options });
 }
 
-function crc32(buffer) {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type, data) {
-  const name = Buffer.from(type, 'ascii');
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(data.length);
-  const checksum = Buffer.alloc(4);
-  checksum.writeUInt32BE(crc32(Buffer.concat([name, data])));
-  return Buffer.concat([header, name, data, checksum]);
-}
-
-function makePng(width, height, rgba) {
-  const scanlines = Buffer.alloc(height * (width * 4 + 1));
-  for (let y = 0; y < height; y += 1) {
-    const output = y * (width * 4 + 1);
-    scanlines[output] = 0;
-    rgba.copy(scanlines, output + 1, y * width * 4, (y + 1) * width * 4);
-  }
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8;
-  ihdr[9] = 6;
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', deflateSync(scanlines, { level: 9 })),
-    pngChunk('IEND', Buffer.alloc(0))
-  ]);
-}
-
-function makeIconPixels(size) {
-  const rgba = Buffer.alloc(size * size * 4);
-  const bars = [
-    { x: 0.22, top: 0.56, color: [77, 225, 255] },
-    { x: 0.37, top: 0.37, color: [88, 231, 255] },
-    { x: 0.52, top: 0.21, color: [130, 206, 255] },
-    { x: 0.67, top: 0.46, color: [207, 125, 255] }
-  ];
-  const radius = size * 0.21;
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const index = (y * size + x) * 4;
-      const cx = Math.max(radius, Math.min(size - radius, x + 0.5));
-      const cy = Math.max(radius, Math.min(size - radius, y + 0.5));
-      const inside = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) <= radius - 0.7;
-      if (!inside) continue;
-      const t = y / Math.max(1, size - 1);
-      rgba[index] = Math.round(7 + t * 8);
-      rgba[index + 1] = Math.round(19 + t * 24);
-      rgba[index + 2] = Math.round(33 + t * 35);
-      rgba[index + 3] = 255;
-      const edgeDistance = Math.min(x, y, size - 1 - x, size - 1 - y);
-      if (edgeDistance < Math.max(1, size * 0.025)) {
-        rgba[index] = 30; rgba[index + 1] = 91; rgba[index + 2] = 118;
-      }
-      for (const bar of bars) {
-        const halfWidth = size * 0.044;
-        if (Math.abs(x + 0.5 - size * bar.x) <= halfWidth && y + 0.5 >= size * bar.top && y + 0.5 <= size * 0.79) {
-          const glow = 0.78 + 0.22 * (1 - (y / size - bar.top) / Math.max(0.01, 0.79 - bar.top));
-          rgba[index] = Math.round(bar.color[0] * glow);
-          rgba[index + 1] = Math.round(bar.color[1] * glow);
-          rgba[index + 2] = Math.round(bar.color[2] * glow);
-        }
-      }
-    }
-  }
-  return rgba;
-}
-
 async function createIcons(assetRoot) {
   await mkdir(assetRoot, { recursive: true });
-  const iconFile = new ResEdit.Data.IconFile();
-  let raw64;
-  for (const size of [16, 32, 48, 64, 128, 256]) {
-    const rgba = makeIconPixels(size);
-    const png = makePng(size, size, rgba);
-    if (size === 64) {
-      raw64 = rgba;
-      await writeFile(join(assetRoot, 'icon.png'), png);
-    }
-    iconFile.icons.push({
-      width: size, height: size, colors: 0, planes: 1, bitCount: 32,
-      data: ResEdit.Data.RawIconItem.from(png, size, size, 32)
-    });
+  const iconRoot = join(root, 'packaging');
+  for (const file of ['icon.png', 'icon.ico', 'icon.rgba']) {
+    await copyFile(join(iconRoot, file), join(assetRoot, file));
   }
-  const ico = Buffer.from(iconFile.generate());
-  await writeFile(join(assetRoot, 'icon.ico'), ico);
-  await writeFile(join(assetRoot, 'icon.rgba'), raw64);
-  return ico;
+  return readFile(join(iconRoot, 'icon.ico'));
 }
 
 async function buildLauncher() {
@@ -163,7 +75,7 @@ async function buildLauncher() {
   return executable;
 }
 
-async function addExecutableResources(executablePath, ico) {
+async function addExecutableResources(executablePath, ico, metadata = {}) {
   const executable = PELibrary.NtExecutable.from(await readFile(executablePath));
   const resources = PELibrary.NtExecutableResource.from(executable);
   const iconFile = ResEdit.Data.IconFile.from(ico);
@@ -184,11 +96,11 @@ async function addExecutableResources(executablePath, ico) {
       lang: 1033, codepage: 1200,
       values: {
         CompanyName: 'MIDI Voyager',
-        FileDescription: 'MIDI Voyager Windows',
+        FileDescription: metadata.fileDescription || portableName,
         FileVersion: appVersion,
-        InternalName: 'MidiVoyagerWindows',
-        OriginalFilename: `${portableName}.exe`,
-        ProductName: portableName,
+        InternalName: metadata.internalName || 'MidiVoyagerWindows',
+        OriginalFilename: metadata.originalFilename || `${portableName}.exe`,
+        ProductName: metadata.productName || portableName,
         ProductVersion: appVersion
       }
     }]
@@ -196,9 +108,11 @@ async function addExecutableResources(executablePath, ico) {
   version.outputToResourceEntries(resources.entries);
   resources.outputResource(executable);
   await writeFile(executablePath, Buffer.from(executable.generate()));
-  const prebuiltRoot = join(root, 'packaging', 'prebuilt');
-  await mkdir(prebuiltRoot, { recursive: true });
-  await copyFile(executablePath, join(prebuiltRoot, `${portableName}.exe`));
+  if (metadata.persistPrebuilt) {
+    const prebuiltRoot = join(root, 'packaging', 'prebuilt');
+    await mkdir(prebuiltRoot, { recursive: true });
+    await copyFile(executablePath, join(prebuiltRoot, `${portableName}.exe`));
+  }
 }
 
 async function findVendorFile(modulePath, tarballName, archivePath) {
@@ -232,7 +146,9 @@ async function stagePortable(launcher) {
   await mkdir(portableRoot, { recursive: true });
   await copyFile(launcher, join(portableRoot, `${portableName}.exe`));
   await mkdir(join(portableRoot, 'app'), { recursive: true });
-  await copyFile(join(root, 'host', 'host.cjs'), join(portableRoot, 'app', 'host.cjs'));
+  for (const file of ['host.cjs', 'open-with.cjs']) {
+    await copyFile(join(root, 'host', file), join(portableRoot, 'app', file));
+  }
   await cp(uiBuild, join(portableRoot, 'ui'), { recursive: true });
   await copyFile(join(root, 'README-Windows.txt'), join(portableRoot, 'README.txt'));
   await copyFile(join(root, 'THIRD-PARTY-NOTICES.txt'), join(portableRoot, 'THIRD-PARTY-NOTICES.txt'));
@@ -254,6 +170,163 @@ async function stagePortable(launcher) {
   for (const file of ['index.js', 'js-bindings.js', 'package.json']) {
     await copyFile(join(root, 'node_modules', '@webviewjs', 'webview', file), join(webviewRoot, file));
   }
+}
+
+function utf16Directives(value) {
+  const bytes = Buffer.from(`${value}\0`, 'utf16le');
+  const words = [];
+  for (let offset = 0; offset < bytes.length; offset += 2) words.push(bytes.readUInt16LE(offset));
+  const lines = [];
+  for (let index = 0; index < words.length; index += 24) lines.push(`    .short ${words.slice(index, index + 24).join(',')}`);
+  return lines.join('\n');
+}
+
+function installerLauncherAssembly(commandLine) {
+  return `/* Generated x64 Windows setup launcher. */
+    .section .text
+    .global WinMainCRTStartup
+WinMainCRTStartup:
+    andq $-16, %rsp
+    subq $0x80, %rsp
+
+    xorl %ecx, %ecx
+    leaq module_path(%rip), %rdx
+    movl $32768, %r8d
+    call *__imp_GetModuleFileNameW(%rip)
+    testl %eax, %eax
+    jz setup_error
+
+    leaq setup_path_environment(%rip), %rcx
+    leaq module_path(%rip), %rdx
+    call *__imp_SetEnvironmentVariableW(%rip)
+    testl %eax, %eax
+    jz setup_error
+
+    movl $104, startup_info(%rip)
+    movq $0, 0x20(%rsp)
+    movq $0x08000000, 0x28(%rsp)
+    movq $0, 0x30(%rsp)
+    movq $0, 0x38(%rsp)
+    leaq startup_info(%rip), %rax
+    movq %rax, 0x40(%rsp)
+    leaq process_info(%rip), %rax
+    movq %rax, 0x48(%rsp)
+    xorq %rcx, %rcx
+    leaq setup_command_line(%rip), %rdx
+    xorq %r8, %r8
+    xorq %r9, %r9
+    call *__imp_CreateProcessW(%rip)
+    testl %eax, %eax
+    jz setup_error
+
+    movq process_info+8(%rip), %rcx
+    call *__imp_CloseHandle(%rip)
+    movq process_info(%rip), %rcx
+    movl $0xffffffff, %edx
+    call *__imp_WaitForSingleObject(%rip)
+    movq process_info(%rip), %rcx
+    leaq child_exit_code(%rip), %rdx
+    call *__imp_GetExitCodeProcess(%rip)
+    movq process_info(%rip), %rcx
+    call *__imp_CloseHandle(%rip)
+    movl child_exit_code(%rip), %ecx
+    testl %ecx, %ecx
+    jnz setup_error
+    xorl %ecx, %ecx
+    call *__imp_ExitProcess(%rip)
+
+setup_error:
+    xorq %rcx, %rcx
+    leaq error_message(%rip), %rdx
+    leaq window_title(%rip), %r8
+    movl $0x10, %r9d
+    call *__imp_MessageBoxW(%rip)
+    movl $1, %ecx
+    call *__imp_ExitProcess(%rip)
+
+    .section .data
+    .align 2
+setup_path_environment:
+${utf16Directives('MIDI_VOYAGER_SETUP_PATH')}
+window_title:
+${utf16Directives(`${portableName} Setup`)}
+error_message:
+${utf16Directives('Setup could not start Windows PowerShell or did not finish successfully. Please run the installer again.')}
+setup_command_line:
+${utf16Directives(commandLine)}
+
+    .section .bss
+    .align 16
+module_path:
+    .skip 65536
+startup_info:
+    .skip 104
+process_info:
+    .skip 24
+child_exit_code:
+    .skip 4
+`;
+}
+
+async function buildInstaller(ico) {
+  const installerBuildRoot = join(buildRoot, 'installer');
+  const importRoot = join(buildRoot, 'importlibs');
+  const setupBase = join(installerBuildRoot, 'setup-base.exe');
+  const setupSource = join(installerBuildRoot, 'setup.S');
+  const setupObject = join(installerBuildRoot, 'setup.o');
+  const prebuiltSetup = join(root, 'packaging', 'prebuilt', 'MIDI Voyager Windows Setup Stub.exe');
+  await mkdir(installerBuildRoot, { recursive: true });
+
+  const installTemplate = await readFile(join(root, 'packaging', 'install.ps1'), 'utf8');
+  const installScript = installTemplate
+    .replaceAll('__APP_VERSION__', appVersion)
+    .replaceAll('__PAYLOAD_MARKER__', installerPayloadMarker);
+  const compressedScript = gzipSync(Buffer.from(installScript, 'utf8'), { level: 9 }).toString('base64');
+  const loader = `$b=[Convert]::FromBase64String('${compressedScript}');$m=New-Object IO.MemoryStream(,$b);$g=New-Object IO.Compression.GzipStream($m,[IO.Compression.CompressionMode]::Decompress);$r=New-Object IO.StreamReader($g,[Text.Encoding]::UTF8);Invoke-Expression ($r.ReadToEnd())`;
+  const encodedLoader = Buffer.from(loader, 'utf16le').toString('base64');
+  const commandLine = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedLoader}`;
+  if (commandLine.length >= 32_000) throw new Error(`The setup command line is too long (${commandLine.length} characters).`);
+  await writeFile(setupSource, installerLauncherAssembly(commandLine));
+
+  if (commandExists('as') && commandExists('ld')) {
+    run('as', ['--64', setupSource, '-o', setupObject]);
+    run('ld', [
+      '-mi386pep', '--image-base', '0x140000000', '--subsystem', 'windows', '--entry', 'WinMainCRTStartup',
+      '--stack', '1048576,4096', '--dynamicbase', '--high-entropy-va', '--nxcompat', '--strip-all', '-o', setupBase,
+      setupObject, join(importRoot, 'libkernel32.a'), join(importRoot, 'libuser32.a')
+    ]);
+  } else if (await exists(prebuiltSetup)) {
+    await copyFile(prebuiltSetup, setupBase);
+  } else {
+    throw new Error('GNU as/ld are unavailable and the prebuilt installer launcher is missing.');
+  }
+  await addExecutableResources(setupBase, ico, {
+    fileDescription: `${portableName} Installer`,
+    internalName: 'MidiVoyagerWindowsSetup',
+    originalFilename: installerName,
+    productName: `${portableName} Setup`
+  });
+  await mkdir(join(root, 'packaging', 'prebuilt'), { recursive: true });
+  await copyFile(setupBase, prebuiltSetup);
+
+  const payloadRoot = join(installerBuildRoot, 'payload');
+  const payloadZip = join(installerBuildRoot, 'payload.zip');
+  await cp(portableRoot, payloadRoot, { recursive: true });
+  await copyFile(join(root, 'packaging', 'uninstall.ps1'), join(payloadRoot, 'Uninstall.ps1'));
+  await createFlatZip(payloadRoot, payloadZip);
+  await verifyZip(payloadZip);
+
+  const setupOutput = join(releaseRoot, installerName);
+  await copyFile(setupBase, setupOutput);
+  await appendFile(setupOutput, Buffer.from(installerPayloadMarker, 'ascii'));
+  await appendFile(setupOutput, await readFile(payloadZip));
+  const setupBytes = await readFile(setupOutput);
+  const markerIndex = setupBytes.lastIndexOf(Buffer.from(installerPayloadMarker, 'ascii'));
+  const payloadStart = markerIndex + installerPayloadMarker.length;
+  if (markerIndex < 0 || setupBytes.subarray(payloadStart, payloadStart + 2).toString('ascii') !== 'PK') {
+    throw new Error('The generated installer payload could not be verified.');
+  }
+  return setupOutput;
 }
 
 async function stageSource() {
@@ -292,6 +365,16 @@ async function createZip(parentDirectory, folderName, outputPath) {
   await writeFile(outputPath, Buffer.from(zipSync(files, { level: 9 })));
 }
 
+async function createFlatZip(directory, outputPath) {
+  if (spawnSync('zip', ['-v'], { stdio: 'ignore' }).status === 0) {
+    run('zip', ['-9', '-q', '-r', outputPath, '.'], { cwd: directory });
+    return;
+  }
+  const files = {};
+  await collectZipFiles(directory, '', files);
+  await writeFile(outputPath, Buffer.from(zipSync(files, { level: 9 })));
+}
+
 async function verifyZip(filePath) {
   if (spawnSync('unzip', ['-v'], { stdio: 'ignore' }).status === 0) {
     run('unzip', ['-tqq', filePath]);
@@ -327,8 +410,9 @@ async function main() {
   await copyFile(join(root, 'node_modules', 'generaluser', 'GeneralUser.sf2'), join(assetRoot, 'GeneralUser.sf2'));
   const ico = await createIcons(assetRoot);
   const launcher = await buildLauncher();
-  await addExecutableResources(launcher, ico);
+  await addExecutableResources(launcher, ico, { persistPrebuilt: true });
   await stagePortable(launcher);
+  const installer = await buildInstaller(ico);
   const { sourceStageRoot } = await stageSource();
 
   const portableZip = join(releaseRoot, portableZipName);
@@ -337,12 +421,14 @@ async function main() {
   await createZip(sourceStageRoot, sourceFolderName, sourceZip);
   await verifyZip(portableZip);
   await verifyZip(sourceZip);
+  const installerStats = await stat(installer);
   const portableStats = await stat(portableZip);
   const sourceStats = await stat(sourceZip);
-  const checksums = `${await sha256(portableZip)}  ${portableZipName}\n${await sha256(sourceZip)}  ${sourceZipName}\n`;
+  const checksums = `${await sha256(installer)}  ${installerName}\n${await sha256(portableZip)}  ${portableZipName}\n${await sha256(sourceZip)}  ${sourceZipName}\n`;
   await writeFile(join(releaseRoot, 'SHA256SUMS.txt'), checksums);
 
   const files = await readdir(portableRoot, { withFileTypes: true });
+  console.log(`Built ${installerName} (${(installerStats.size / 1024 / 1024).toFixed(1)} MiB)`);
   console.log(`Built ${portableZipName} (${(portableStats.size / 1024 / 1024).toFixed(1)} MiB)`);
   console.log(`Built ${sourceZipName} (${(sourceStats.size / 1024 / 1024).toFixed(1)} MiB)`);
   console.log(`Portable root entries: ${files.map((item) => item.name).join(', ')}`);

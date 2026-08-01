@@ -31,7 +31,10 @@ export class AppStore {
       showGrid: true,
       theme: 'midnight',
       lastPerspective: 'performance',
-      midiOutputOnly: true
+      midiOutputOnly: true,
+      soundFonts: [],
+      soundFontOrder: ['builtin:default'],
+      defaultSoundFontEnabled: true
     });
     this.recents = read('recents', []);
     this.playlists = read('playlists', [

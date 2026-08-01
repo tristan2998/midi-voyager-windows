@@ -5,10 +5,16 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const net = require('node:net');
+const { launchFilePaths, encodeOpenRequest, decodeOpenRequest } = require('./open-with.cjs');
 
 const APP_NAME = 'MIDI Voyager Windows';
 const MAX_READ_CHUNK_BYTES = 1024 * 1024;
 const appRoot = path.resolve(__dirname, '..');
+const instanceId = crypto.createHash('sha256').update(appRoot.toLowerCase()).digest('hex').slice(0, 16);
+const INSTANCE_PIPE = process.platform === 'win32'
+  ? `\\\\.\\pipe\\MidiVoyagerWindows-${instanceId}`
+  : path.join(os.tmpdir(), `midi-voyager-windows-${instanceId}.sock`);
 let Application;
 try {
   ({ Application } = require('../runtime/webview/index.js'));
@@ -31,6 +37,85 @@ const saveSessions = new Map();
 let mainWindow = null;
 let mainWebview = null;
 let mainWebContext = null;
+let instanceServer = null;
+let interfaceReadyForFiles = false;
+const pendingOpenPaths = launchFilePaths(process.argv.slice(2));
+
+function focusMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.setMinimized(false);
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function flushOpenRequests() {
+  if (!interfaceReadyForFiles || !mainWebview || !pendingOpenPaths.length) return;
+  const paths = pendingOpenPaths.splice(0);
+  const descriptors = [];
+  for (const filePath of paths) {
+    try { descriptors.push(tokenForFile(filePath)); } catch { /* The file may have moved since Windows invoked the app. */ }
+  }
+  if (descriptors.length) mainWebview.evaluateScript(`window.__onNativeOpen?.(${JSON.stringify(descriptors)});`);
+}
+
+function queueOpenRequest(paths, shouldFocus = true) {
+  pendingOpenPaths.push(...launchFilePaths(paths));
+  if (shouldFocus) focusMainWindow();
+  flushOpenRequests();
+}
+
+function forwardToExistingInstance(paths) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (forwarded) => {
+      if (settled) return;
+      settled = true;
+      resolve(forwarded);
+    };
+    const socket = net.createConnection(INSTANCE_PIPE);
+    socket.setTimeout(1200);
+    socket.once('connect', () => socket.end(encodeOpenRequest(paths)));
+    socket.once('close', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.once('timeout', () => { socket.destroy(); finish(false); });
+  });
+}
+
+function listenForInstanceRequests() {
+  const server = net.createServer((socket) => {
+    let input = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      input += chunk;
+      let newline;
+      while ((newline = input.indexOf('\n')) >= 0) {
+        const line = input.slice(0, newline); input = input.slice(newline + 1);
+        try {
+          const request = decodeOpenRequest(line);
+          queueOpenRequest(request.paths, request.focus);
+        } catch { /* Ignore malformed local messages. */ }
+      }
+    });
+  });
+  return new Promise((resolve, reject) => {
+    const onError = (error) => { server.off('listening', onListening); reject(error); };
+    const onListening = () => { server.off('error', onError); resolve(server); };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(INSTANCE_PIPE);
+  });
+}
+
+async function claimApplicationInstance() {
+  if (await forwardToExistingInstance(pendingOpenPaths)) return false;
+  try {
+    instanceServer = await listenForInstanceRequests();
+    return true;
+  } catch (error) {
+    if (error.code === 'EADDRINUSE' && await forwardToExistingInstance(pendingOpenPaths)) return false;
+    throw error;
+  }
+}
 
 function tokenForFile(filePath) {
   const absolute = path.resolve(filePath);
@@ -178,6 +263,11 @@ function exposeNativeBridge() {
       return paths.map(tokenForFile);
     },
     openKnownFile: async (filePath) => tokenForFile(filePath),
+    readyForFileOpen: async () => {
+      interfaceReadyForFiles = true;
+      flushOpenRequests();
+      return true;
+    },
     readFileChunk,
     beginSave: async (suggestedName, expectedSize) => {
       const exportsDirectory = path.join(os.homedir(), 'Music', 'MIDI Voyager Exports');
@@ -211,6 +301,7 @@ function exposeNativeBridge() {
 }
 
 async function start() {
+  if (!(await claimApplicationInstance())) return;
   const app = new Application();
   await app.whenReady();
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
@@ -253,8 +344,9 @@ async function start() {
     }
     if (descriptors.length) mainWebview.evaluateScript(`window.__onNativeDrop?.(${JSON.stringify(descriptors)});`);
   });
-  app.on('application-close-requested', () => app.exit());
-  app.on('window-close-requested', () => app.exit());
+  const exit = () => { instanceServer?.close(); app.exit(); };
+  app.on('application-close-requested', exit);
+  app.on('window-close-requested', exit);
 }
 
 start().catch((error) => {

@@ -33,3 +33,53 @@ test('modified MIDI export applies pitch/mixer state and inserts user markers', 
   assert.ok(events.some((event) => event.type === 'controller' && event.controllerType === 10));
 });
 
+function soundBankHarness() {
+  const engine = new AudioEngine();
+  const calls = { added: [], deleted: [], orders: [] };
+  const manager = {
+    active: ['default'],
+    async addSoundBank(buffer, id, bankOffset) {
+      calls.added.push({ id, bankOffset, size: buffer.byteLength });
+      if (!this.active.includes(id)) this.active.push(id);
+    },
+    async deleteSoundBank(id) {
+      calls.deleted.push(id);
+      this.active = this.active.filter((item) => item !== id);
+    },
+    set priorityOrder(order) {
+      calls.orders.push([...order]);
+      this.active = [...order];
+    },
+    get priorityOrder() { return [...this.active]; }
+  };
+  engine.synth = { soundBankManager: manager, midiChannels: [] };
+  engine.soundBanks.set('default', {
+    id: 'default', name: 'GeneralUser GS', buffer: new ArrayBuffer(8), bankOffset: 0, builtIn: true, enabled: true
+  });
+  engine.bankOrder = ['default'];
+  return { engine, calls };
+}
+
+test('SoundFont stack supports live priority changes and enable toggles', async () => {
+  const { engine, calls } = soundBankHarness();
+  await engine.addSoundBank(new ArrayBuffer(12), 'Bank A', 0, 'A.sf2', { id: 'a' });
+  await engine.addSoundBank(new ArrayBuffer(16), 'Bank B', 0, 'B.sf2', { id: 'b' });
+  assert.deepEqual(engine.getSoundBanks().map((bank) => bank.id), ['b', 'a', 'default']);
+
+  engine.setSoundBankOrder(['default', 'a', 'b']);
+  assert.deepEqual(calls.orders.at(-1), ['default', 'a', 'b']);
+  await engine.setSoundBankEnabled('a', false);
+  assert.deepEqual(calls.deleted, ['a']);
+  assert.deepEqual(calls.orders.at(-1), ['default', 'b']);
+  assert.equal(engine.getSoundBanks().find((bank) => bank.id === 'a').enabled, false);
+
+  await engine.setSoundBankEnabled('a', true);
+  assert.equal(calls.added.at(-1).id, 'a');
+  assert.deepEqual(calls.orders.at(-1), ['default', 'a', 'b']);
+});
+
+test('SoundFont stack never allows the final active bank to be disabled', async () => {
+  const { engine } = soundBankHarness();
+  await assert.rejects(engine.setSoundBankEnabled('default', false), /At least one SoundFont must remain enabled/);
+  assert.equal(engine.getSoundBanks()[0].enabled, true);
+});

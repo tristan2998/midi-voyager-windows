@@ -16,6 +16,11 @@ import {
 import { Visualizer } from './visualizer.js';
 import { AppStore } from './storage.js';
 import { readDescriptor } from './file-reader.js';
+import {
+  moveSoundBank,
+  resolveSavedSoundBankOrder,
+  soundFontStorageKey
+} from './soundfont-stack.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -48,6 +53,8 @@ const state = {
   maxTempo: Number(store.settings.maxTempo) || 4
 };
 let persistedSoundFontsRestored = false;
+let draggedSoundFontId = null;
+let incomingFileQueue = Promise.resolve();
 
 function toast(title, message = '', type = '') {
   const item = document.createElement('div');
@@ -222,13 +229,10 @@ async function loadSoundFontDescriptor(descriptor) {
         if (total > 2 * 1024 * 1024) setBusy(true, `Loading SoundFont ${descriptor.name}… ${Math.round(loaded / total * 100)}%`);
       }
     });
+    await engine.ensureReady();
+    await restorePersistedSoundFonts();
     await engine.addSoundBank(buffer, descriptor.name, 0, descriptor.path || null);
-    if (descriptor.path) {
-      const saved = Array.isArray(store.settings.soundFonts) ? store.settings.soundFonts : [];
-      if (!saved.some((item) => item.path === descriptor.path)) {
-        store.updateSettings({ soundFonts: [...saved, { name: descriptor.name, path: descriptor.path }] });
-      }
-    }
+    persistSoundFontStack();
     renderSoundFonts();
     setBusy(false);
     toast('SoundFont loaded', descriptor.name, 'success');
@@ -238,17 +242,43 @@ async function loadSoundFontDescriptor(descriptor) {
   }
 }
 
+function persistSoundFontStack() {
+  const banks = engine.getSoundBanks();
+  const persistentBanks = banks.filter((bank) => bank.builtIn || bank.sourcePath);
+  const defaultBank = banks.find((bank) => bank.builtIn);
+  store.updateSettings({
+    soundFonts: banks
+      .filter((bank) => !bank.builtIn && bank.sourcePath)
+      .map((bank) => ({ name: bank.name, path: bank.sourcePath, enabled: bank.enabled !== false })),
+    soundFontOrder: persistentBanks.map(soundFontStorageKey),
+    defaultSoundFontEnabled: defaultBank?.enabled !== false
+  });
+}
+
 async function restorePersistedSoundFonts() {
   if (persistedSoundFontsRestored || !window.native?.openKnownFile) return;
   persistedSoundFontsRestored = true;
-  for (const saved of store.settings.soundFonts || []) {
+  const savedFonts = Array.isArray(store.settings.soundFonts) ? store.settings.soundFonts : [];
+  for (const saved of savedFonts) {
     try {
       const descriptor = await window.native.openKnownFile(saved.path);
       const buffer = await readDescriptor(descriptor);
-      await engine.addSoundBank(buffer, saved.name || descriptor.name, 0, saved.path);
+      await engine.addSoundBank(buffer, saved.name || descriptor.name, 0, saved.path, {
+        enabled: saved.enabled !== false,
+        position: 'bottom'
+      });
     } catch (error) {
       console.warn(`Could not restore SoundFont ${saved.name || saved.path}`, error);
     }
+  }
+  engine.setSoundBankOrder(resolveSavedSoundBankOrder(
+    engine.getSoundBanks(),
+    store.settings.soundFontOrder,
+    savedFonts
+  ));
+  if (store.settings.defaultSoundFontEnabled === false) {
+    try { await engine.setSoundBankEnabled('default', false); }
+    catch (error) { console.warn('The bundled fallback SoundFont had to remain enabled.', error); }
   }
 }
 
@@ -625,25 +655,110 @@ function renderSoundFonts() {
   const banks = engine.getSoundBanks();
   if (!banks.length) return root.append(emptyNode('The engine will load when you open a MIDI or add a SoundFont.'));
   banks.forEach((bank, index) => {
-    const row = document.createElement('div'); row.className = 'soundfont-row';
+    const row = document.createElement('div'); row.className = 'soundfont-row'; row.dataset.bankId = bank.id;
+    row.classList.toggle('disabled', !bank.enabled);
+    const handle = document.createElement('button');
+    handle.className = 'bank-drag-handle'; handle.type = 'button'; handle.textContent = '⠿'; handle.draggable = true;
+    handle.title = 'Drag to change priority'; handle.setAttribute('aria-label', `Move ${bank.name}`); handle.setAttribute('aria-grabbed', 'false');
     const icon = document.createElement('span'); icon.className = 'bank-icon'; icon.textContent = 'SF';
-    const copy = document.createElement('div');
+    const copy = document.createElement('div'); copy.className = 'soundfont-copy';
     const name = document.createElement('strong'); name.textContent = bank.name;
-    const meta = document.createElement('small'); meta.textContent = `${formatBytes(bank.size)} · ${bank.builtIn ? 'Built-in fallback' : `Priority ${index + 1}`}`;
-    copy.append(name, meta); row.append(icon, copy);
+    const status = bank.enabled ? `Active priority ${bank.priority}` : `Disabled · stack position ${index + 1}`;
+    const meta = document.createElement('small'); meta.textContent = `${formatBytes(bank.size)} · ${bank.builtIn ? 'Built-in' : 'Custom'} · ${status}`;
+    copy.append(name, meta);
+    const enabledLabel = document.createElement('label'); enabledLabel.className = 'bank-enabled-toggle';
+    const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = bank.enabled !== false;
+    enabled.setAttribute('aria-label', `Enable ${bank.name}`);
+    const enabledText = document.createElement('span'); enabledText.textContent = 'Enabled';
+    enabledLabel.append(enabled, enabledText);
+    row.append(handle, icon, copy, enabledLabel);
+
+    handle.addEventListener('dragstart', (event) => {
+      draggedSoundFontId = bank.id;
+      row.classList.add('dragging');
+      handle.setAttribute('aria-grabbed', 'true');
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', bank.id);
+    });
+    handle.addEventListener('dragend', () => {
+      draggedSoundFontId = null;
+      handle.setAttribute('aria-grabbed', 'false');
+      row.classList.remove('dragging');
+      clearSoundFontDropIndicators();
+      $('#visual-shell').classList.remove('dragging');
+    });
+    handle.addEventListener('keydown', (event) => {
+      if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      event.preventDefault();
+      const ids = engine.getSoundBanks().map((item) => item.id);
+      const sourceIndex = ids.indexOf(bank.id);
+      const targetIndex = sourceIndex + (event.key === 'ArrowUp' ? -1 : 1);
+      if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= ids.length) return;
+      reorderSoundFontStack(bank.id, ids[targetIndex], event.key === 'ArrowDown');
+    });
+    row.addEventListener('dragover', (event) => {
+      if (!draggedSoundFontId || draggedSoundFontId === bank.id) return;
+      event.preventDefault(); event.stopPropagation();
+      event.dataTransfer.dropEffect = 'move';
+      clearSoundFontDropIndicators();
+      const after = event.clientY > row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2;
+      row.classList.add(after ? 'drop-after' : 'drop-before');
+    });
+    row.addEventListener('drop', (event) => {
+      if (!draggedSoundFontId || draggedSoundFontId === bank.id) return;
+      event.preventDefault(); event.stopPropagation();
+      const after = event.clientY > row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2;
+      reorderSoundFontStack(draggedSoundFontId, bank.id, after);
+      draggedSoundFontId = null;
+      clearSoundFontDropIndicators();
+    });
+    enabled.addEventListener('change', async () => {
+      enabled.disabled = true;
+      try {
+        await engine.setSoundBankEnabled(bank.id, enabled.checked);
+        persistSoundFontStack();
+        renderSoundFonts();
+        toast(enabled.checked ? 'SoundFont enabled' : 'SoundFont disabled', bank.name, 'success');
+      } catch (error) {
+        enabled.checked = bank.enabled !== false;
+        enabled.disabled = false;
+        friendlyError(error);
+      }
+    });
     if (!bank.builtIn) {
       const remove = document.createElement('button'); remove.className = 'remove-bank'; remove.type = 'button'; remove.textContent = 'Remove';
       remove.addEventListener('click', async () => {
-        await engine.removeSoundBank(bank.id);
-        if (bank.sourcePath) {
-          store.updateSettings({ soundFonts: (store.settings.soundFonts || []).filter((item) => item.path !== bank.sourcePath) });
-        }
-        renderSoundFonts();
+        try {
+          await engine.removeSoundBank(bank.id);
+          persistSoundFontStack();
+          renderSoundFonts();
+        } catch (error) { friendlyError(error); }
       });
       row.append(remove);
     }
     root.append(row);
   });
+}
+
+function clearSoundFontDropIndicators() {
+  $$('.soundfont-row').forEach((row) => row.classList.remove('drop-before', 'drop-after'));
+}
+
+function focusSoundFontHandle(id) {
+  requestAnimationFrame(() => {
+    const row = $$('.soundfont-row').find((item) => item.dataset.bankId === id);
+    row?.querySelector('.bank-drag-handle')?.focus();
+  });
+}
+
+function reorderSoundFontStack(sourceId, targetId, placeAfter) {
+  const current = engine.getSoundBanks().map((bank) => bank.id);
+  const next = moveSoundBank(current, sourceId, targetId, placeAfter);
+  if (next.every((id, index) => id === current[index])) return;
+  engine.setSoundBankOrder(next);
+  persistSoundFontStack();
+  renderSoundFonts();
+  focusSoundFontHandle(sourceId);
 }
 
 function renderPerspectives() {
@@ -1115,28 +1230,40 @@ async function scanMIDIDevices() {
   } catch (error) { $('#midi-status').textContent = error.message; friendlyError(error); }
 }
 
+async function openIncomingDescriptors(files) {
+  const descriptors = files || [];
+  if (!descriptors.length) return;
+  const midi = descriptors.filter((item) => !/\.(sf2|sf3|dls|sf2pack)$/i.test(item.name));
+  const banks = descriptors.filter((item) => /\.(sf2|sf3|dls|sf2pack)$/i.test(item.name));
+  for (const bank of banks) await loadSoundFontDescriptor(bank);
+  if (midi.length) { state.queue = midi; state.queueIndex = 0; await loadDescriptor(midi[0]); }
+}
+
+function queueIncomingDescriptors(files) {
+  incomingFileQueue = incomingFileQueue.then(() => openIncomingDescriptors(files)).catch(friendlyError);
+  return incomingFileQueue;
+}
+
 function bindDragAndDrop() {
   const shell = $('#visual-shell');
   let depth = 0;
-  window.addEventListener('dragenter', (event) => { event.preventDefault(); depth++; shell.classList.add('dragging'); });
-  window.addEventListener('dragover', (event) => event.preventDefault());
-  window.addEventListener('dragleave', (event) => { event.preventDefault(); depth = Math.max(0, depth - 1); if (!depth) shell.classList.remove('dragging'); });
+  window.addEventListener('dragenter', (event) => {
+    if (draggedSoundFontId) return;
+    event.preventDefault(); depth++; shell.classList.add('dragging');
+  });
+  window.addEventListener('dragover', (event) => { if (!draggedSoundFontId) event.preventDefault(); });
+  window.addEventListener('dragleave', (event) => {
+    if (draggedSoundFontId) return;
+    event.preventDefault(); depth = Math.max(0, depth - 1); if (!depth) shell.classList.remove('dragging');
+  });
   window.addEventListener('drop', async (event) => {
+    if (draggedSoundFontId) { event.preventDefault(); return; }
     event.preventDefault(); depth = 0; shell.classList.remove('dragging');
     const descriptors = descriptorsFromFileList(event.dataTransfer.files);
-    if (!descriptors.length) return;
-    const midi = descriptors.filter((item) => !/\.(sf2|sf3|dls|sf2pack)$/i.test(item.name));
-    const banks = descriptors.filter((item) => /\.(sf2|sf3|dls|sf2pack)$/i.test(item.name));
-    for (const bank of banks) await loadSoundFontDescriptor(bank);
-    if (midi.length) { state.queue = midi; state.queueIndex = 0; await loadDescriptor(midi[0]); }
+    await openIncomingDescriptors(descriptors);
   });
-  window.__onNativeDrop = async (files) => {
-    const descriptors = files || []; if (!descriptors.length) return;
-    const midi = descriptors.filter((item) => !/\.(sf2|sf3|dls|sf2pack)$/i.test(item.name));
-    const banks = descriptors.filter((item) => /\.(sf2|sf3|dls|sf2pack)$/i.test(item.name));
-    for (const bank of banks) await loadSoundFontDescriptor(bank);
-    if (midi.length) { state.queue = midi; state.queueIndex = 0; await loadDescriptor(midi[0]); }
-  };
+  window.__onNativeDrop = queueIncomingDescriptors;
+  window.__onNativeOpen = queueIncomingDescriptors;
 }
 
 function bindKeyboard() {
@@ -1163,4 +1290,5 @@ function bindKeyboard() {
 window.addEventListener('beforeunload', () => { saveFileSettings(); engine.destroy(); });
 document.title = APP_NAME;
 bindUI();
+Promise.resolve(window.native?.readyForFileOpen?.()).catch(friendlyError);
 requestAnimationFrame(animationLoop);

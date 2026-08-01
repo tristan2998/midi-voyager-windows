@@ -1,6 +1,8 @@
 LIBRARY KERNEL32.dll
 EXPORTS
   GetModuleFileNameW
+  GetCommandLineW
+  SetEnvironmentVariableW
   SetCurrentDirectoryW
   CreateProcessW
   WaitForSingleObject

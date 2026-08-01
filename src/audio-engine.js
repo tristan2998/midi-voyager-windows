@@ -19,7 +19,7 @@ export class AudioEngine extends EventTarget {
     this.midiName = '';
     this.basicMIDI = null;
     this.soundBanks = new Map();
-    this.customBankOrder = [];
+    this.bankOrder = [];
     this.channelState = Array.from({ length: 16 }, () => ({
       muted: false, solo: false, volume: 1, pan: 0, transpose: 0, program: null, lockedProgram: false
     }));
@@ -65,7 +65,10 @@ export class AudioEngine extends EventTarget {
     const response = await fetch(this.defaultSoundFontUrl);
     if (!response.ok) throw new Error(`Could not load the bundled SoundFont (${response.status}).`);
     const defaultBank = await response.arrayBuffer();
-    this.soundBanks.set('default', { id: 'default', name: 'GeneralUser GS', buffer: defaultBank.slice(0), bankOffset: 0, builtIn: true });
+    this.soundBanks.set('default', {
+      id: 'default', name: 'GeneralUser GS', buffer: defaultBank.slice(0), bankOffset: 0, builtIn: true, enabled: true
+    });
+    this.bankOrder = ['default'];
     await this.synth.soundBankManager.addSoundBank(defaultBank.slice(0), 'default', 0);
     await this.synth.isReady;
 
@@ -228,30 +231,95 @@ export class AudioEngine extends EventTarget {
     }
   }
 
-  async addSoundBank(arrayBuffer, name, bankOffset = 0, sourcePath = null) {
+  _orderedSoundBanks() {
+    return this.bankOrder.map((id) => this.soundBanks.get(id)).filter(Boolean);
+  }
+
+  _enabledBankIds() {
+    return this._orderedSoundBanks().filter((bank) => bank.enabled).map((bank) => bank.id);
+  }
+
+  _syncSoundBankPriority() {
+    const enabledIds = this._enabledBankIds();
+    if (enabledIds.length && this.synth?.soundBankManager) this.synth.soundBankManager.priorityOrder = enabledIds;
+  }
+
+  async addSoundBank(arrayBuffer, name, bankOffset = 0, sourcePath = null, options = {}) {
     await this.ensureReady();
-    const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const entry = { id, name, buffer: arrayBuffer.slice(0), bankOffset: Number(bankOffset) || 0, builtIn: false, sourcePath };
+    const id = options.id || `custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const entry = {
+      id,
+      name,
+      buffer: arrayBuffer.slice(0),
+      bankOffset: Number(bankOffset) || 0,
+      builtIn: false,
+      sourcePath,
+      enabled: options.enabled !== false
+    };
     this.soundBanks.set(id, entry);
-    this.customBankOrder.unshift(id);
-    await this.synth.soundBankManager.addSoundBank(arrayBuffer.slice(0), id, entry.bankOffset);
-    this.synth.soundBankManager.priorityOrder = [...this.customBankOrder, 'default'];
+    this.bankOrder = this.bankOrder.filter((item) => item !== id);
+    if (options.position === 'bottom') this.bankOrder.push(id);
+    else if (Number.isInteger(options.position)) this.bankOrder.splice(clamp(options.position, 0, this.bankOrder.length), 0, id);
+    else this.bankOrder.unshift(id);
+    if (entry.enabled) await this.synth.soundBankManager.addSoundBank(arrayBuffer.slice(0), id, entry.bankOffset);
+    this._syncSoundBankPriority();
     this.dispatchEvent(new CustomEvent('soundbankschange'));
     return id;
   }
 
+  setSoundBankOrder(ids) {
+    const requested = [...new Set((ids || []).filter((id) => this.soundBanks.has(id)))];
+    this.bankOrder = [...requested, ...this.bankOrder.filter((id) => !requested.includes(id) && this.soundBanks.has(id))];
+    this._syncSoundBankPriority();
+    this.dispatchEvent(new CustomEvent('soundbankschange'));
+    return [...this.bankOrder];
+  }
+
+  async setSoundBankEnabled(id, enabled) {
+    await this.ensureReady();
+    const entry = this.soundBanks.get(id);
+    if (!entry) throw new Error('That SoundFont is no longer loaded.');
+    const nextEnabled = Boolean(enabled);
+    if (entry.enabled === nextEnabled) return;
+    if (!nextEnabled && this._enabledBankIds().length <= 1) {
+      throw new Error('At least one SoundFont must remain enabled.');
+    }
+    if (nextEnabled) {
+      await this.synth.soundBankManager.addSoundBank(entry.buffer.slice(0), id, entry.bankOffset);
+      entry.enabled = true;
+    } else {
+      await this.synth.soundBankManager.deleteSoundBank(id);
+      entry.enabled = false;
+    }
+    this._syncSoundBankPriority();
+    this.applyChannelState();
+    this.dispatchEvent(new CustomEvent('soundbankschange'));
+  }
+
   async removeSoundBank(id) {
     if (id === 'default' || !this.soundBanks.has(id)) return;
-    await this.synth.soundBankManager.deleteSoundBank(id);
+    const entry = this.soundBanks.get(id);
+    if (entry.enabled && this._enabledBankIds().length <= 1) {
+      const fallback = this.soundBanks.get('default');
+      if (fallback && !fallback.enabled) {
+        await this.synth.soundBankManager.addSoundBank(fallback.buffer.slice(0), fallback.id, fallback.bankOffset);
+        fallback.enabled = true;
+      }
+    }
+    if (entry.enabled) await this.synth.soundBankManager.deleteSoundBank(id);
     this.soundBanks.delete(id);
-    this.customBankOrder = this.customBankOrder.filter((item) => item !== id);
-    this.synth.soundBankManager.priorityOrder = [...this.customBankOrder, 'default'];
+    this.bankOrder = this.bankOrder.filter((item) => item !== id);
+    this._syncSoundBankPriority();
     this.dispatchEvent(new CustomEvent('soundbankschange'));
   }
 
   getSoundBanks() {
-    const ordered = [...this.customBankOrder.map((id) => this.soundBanks.get(id)).filter(Boolean), this.soundBanks.get('default')].filter(Boolean);
-    return ordered.map(({ buffer, ...item }) => ({ ...item, size: buffer.byteLength }));
+    let activePriority = 0;
+    return this._orderedSoundBanks().map(({ buffer, ...item }) => ({
+      ...item,
+      size: buffer.byteLength,
+      priority: item.enabled ? ++activePriority : null
+    }));
   }
 
   setMetronome(enabled) {
@@ -387,7 +455,7 @@ export class AudioEngine extends EventTarget {
     await renderer.startOfflineRender({
       midiSequence: midi,
       loopCount: 0,
-      soundBankList: [...this.soundBanks.values()].map((bank) => ({
+      soundBankList: this._orderedSoundBanks().filter((bank) => bank.enabled).map((bank) => ({
         bankOffset: bank.bankOffset,
         soundBankBuffer: bank.buffer.slice(0)
       })),

@@ -5,13 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <title>MIDI Voyager Windows</title>
-  <link rel="stylesheet" href="./styles.css?v=1.0.2">
+  <link rel="icon" href="./assets/icon.png">
+  <link rel="stylesheet" href="./styles.css?v=1.1.1">
 </head>
 <body>
   <div id="app" class="app-shell">
     <header class="titlebar">
       <div class="brand" title="MIDI Voyager Windows">
-        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        <img class="brand-mark" src="./assets/icon.png" alt="">
         <div class="brand-copy"><strong>MIDI Voyager</strong><small>WINDOWS</small></div>
       </div>
       <button id="open-midi" class="button primary" type="button"><span class="button-icon">＋</span> Open MIDI</button>
@@ -183,7 +184,7 @@
             <div class="button-row"><button id="export-settings" class="button" type="button">Export settings</button><button id="import-settings" class="button ghost" type="button">Import settings</button></div>
           </section>
           <section class="settings-page" data-settings-content="about">
-            <h3>MIDI Voyager Windows 1.0</h3>
+            <h3>MIDI Voyager Windows 1.1</h3>
             <p class="settings-copy">A clean-room Windows edition built for fast local MIDI playback and visualisation. Audio synthesis runs off the interface thread and uses the included GeneralUser GS SoundFont.</p>
             <p class="settings-copy">Supports MIDI formats 0, 1 and 2, KAR lyrics, RMIDI/XMF parsing, SF2/SF3/DLS sound banks, GS/XG messages, Web MIDI input/output and offline WAV rendering.</p>
           </section>
@@ -196,7 +197,7 @@
   <dialog id="soundfont-dialog" class="modal">
     <form method="dialog" class="modal-card">
       <header><div><small>SOUND ENGINE</small><h2>SoundFonts</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
-      <p class="modal-copy">Stack SF2, SF3 or DLS sound banks. Higher entries take priority; the bundled GeneralUser GS bank remains as a fallback.</p>
+      <p class="modal-copy">Stack SF2, SF3 or DLS sound banks. Drag entries to set priority and use the checkboxes to enable or disable them. Higher enabled entries override lower ones.</p>
       <div id="soundfont-list" class="soundfont-list"></div>
       <div class="button-row"><button id="add-soundfont" class="button primary" type="button">＋ Add SoundFont</button></div>
       <footer><button class="button" value="default">Close</button></footer>
@@ -233,6 +234,6 @@
   </dialog>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=1.0.2"></script>
+  <script type="module" src="./app.js?v=1.1.1"></script>
 </body>
 </html>

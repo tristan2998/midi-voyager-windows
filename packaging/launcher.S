@@ -12,10 +12,97 @@ WinMainCRTStartup:
     call *__imp_GetModuleFileNameW(%rip)
     testl %eax, %eax
     jz launch_error
+    movl %eax, module_path_length(%rip)
+
+    /* Preserve and forward the original arguments (for Windows Open With). */
+    xorq %r10, %r10
+    call *__imp_GetCommandLineW(%rip)
+    testq %rax, %rax
+    jz build_child_command
+    movq %rax, %r10
+skip_initial_space:
+    movzwl (%r10), %eax
+    testl %eax, %eax
+    jz build_child_command
+    cmpl $32, %eax
+    je advance_initial_space
+    cmpl $9, %eax
+    jne inspect_executable_quote
+advance_initial_space:
+    addq $2, %r10
+    jmp skip_initial_space
+inspect_executable_quote:
+    cmpl $34, %eax
+    jne scan_unquoted_executable
+    addq $2, %r10
+scan_quoted_executable:
+    movzwl (%r10), %eax
+    testl %eax, %eax
+    jz build_child_command
+    addq $2, %r10
+    cmpl $34, %eax
+    jne scan_quoted_executable
+    jmp skip_argument_space
+scan_unquoted_executable:
+    movzwl (%r10), %eax
+    testl %eax, %eax
+    jz build_child_command
+    cmpl $32, %eax
+    je skip_argument_space
+    cmpl $9, %eax
+    je skip_argument_space
+    addq $2, %r10
+    jmp scan_unquoted_executable
+skip_argument_space:
+    movzwl (%r10), %eax
+    cmpl $32, %eax
+    je advance_argument_space
+    cmpl $9, %eax
+    jne build_child_command
+advance_argument_space:
+    addq $2, %r10
+    jmp skip_argument_space
+
+build_child_command:
+    leaq child_command_prefix(%rip), %r8
+    leaq command_line(%rip), %r11
+    movl $32760, %r9d
+copy_child_prefix:
+    movzwl (%r8), %eax
+    testl %eax, %eax
+    jz append_original_arguments
+    testl %r9d, %r9d
+    jz launch_error
+    movw %ax, (%r11)
+    addq $2, %r8
+    addq $2, %r11
+    decl %r9d
+    jmp copy_child_prefix
+append_original_arguments:
+    testq %r10, %r10
+    jz terminate_child_command
+    cmpw $0, (%r10)
+    je terminate_child_command
+    movw $32, (%r11)
+    addq $2, %r11
+    decl %r9d
+copy_original_arguments:
+    movzwl (%r10), %eax
+    testl %eax, %eax
+    jz terminate_child_command
+    testl %r9d, %r9d
+    jz launch_error
+    movw %ax, (%r11)
+    addq $2, %r10
+    addq $2, %r11
+    decl %r9d
+    jmp copy_original_arguments
+terminate_child_command:
+    movw $0, (%r11)
 
     /* Trim the executable name, leaving the portable application directory. */
     leaq module_path(%rip), %r10
-    movl %eax, %r11d
+    movl module_path_length(%rip), %r11d
 find_separator:
     testl %r11d, %r11d
     jz launch_error
@@ -73,7 +160,7 @@ launch_error:
 
     .section .data
     .align 2
-command_line:
+child_command_prefix:
     .short 114,117,110,116,105,109,101,92,110,111,100,101,46,101,120,101
     .short 32,97,112,112,92,104,111,115,116,46,99,106,115,0
 window_title:
@@ -86,6 +173,10 @@ error_message:
     .section .bss
     .align 16
 module_path:
+    .skip 65536
+module_path_length:
+    .skip 4
+command_line:
     .skip 65536
 startup_info:
     .skip 104
