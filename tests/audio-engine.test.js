@@ -83,3 +83,21 @@ test('SoundFont stack never allows the final active bank to be disabled', async 
   await assert.rejects(engine.setSoundBankEnabled('default', false), /At least one SoundFont must remain enabled/);
   assert.equal(engine.getSoundBanks()[0].enabled, true);
 });
+
+test('advanced SoundFont tools update offsets and restore state after soloing', async () => {
+  const { engine, calls } = soundBankHarness();
+  await engine.addSoundBank(new ArrayBuffer(12), 'Bank A', 0, 'A.sf2', { id: 'a' });
+  await engine.addSoundBank(new ArrayBuffer(16), 'Bank B', 0, 'B.sf2', { id: 'b' });
+
+  assert.equal(await engine.setSoundBankOffset('a', 17), 17);
+  assert.equal(engine.getSoundBanks().find((bank) => bank.id === 'a').bankOffset, 17);
+  assert.deepEqual(calls.added.at(-1), { id: 'a', bankOffset: 17, size: 12 });
+
+  assert.equal(await engine.toggleSoundBankSolo('a'), true);
+  assert.deepEqual(engine.getSoundBanks().filter((bank) => bank.enabled).map((bank) => bank.id), ['a']);
+  assert.equal(engine.getSoundBanks().find((bank) => bank.id === 'a').soloed, true);
+
+  assert.equal(await engine.toggleSoundBankSolo('a'), false);
+  assert.deepEqual(engine.getSoundBanks().filter((bank) => bank.enabled).map((bank) => bank.id), ['b', 'a', 'default']);
+  assert.equal(engine.getSoundBanks().some((bank) => bank.soloed), false);
+});

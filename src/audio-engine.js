@@ -1,6 +1,7 @@
 import { WorkletSynthesizer, Sequencer, audioBufferToWav } from 'spessasynth_lib';
-import { BasicMIDI, MIDIControllers, MIDIMessage, MIDIMessageTypes } from 'spessasynth_core';
+import { BasicMIDI, MIDIControllers, MIDIMessage, MIDIMessageTypes, SoundBankLoader } from 'spessasynth_core';
 import { clamp } from './constants.js';
+import { normalizeBankOffset, summarizeSoundBank } from './soundfont-stack.js';
 
 const LOAD_TIMEOUT_MS = 20_000;
 
@@ -20,6 +21,9 @@ export class AudioEngine extends EventTarget {
     this.basicMIDI = null;
     this.soundBanks = new Map();
     this.bankOrder = [];
+    this.soundBankSolo = null;
+    this.auditionChannel = null;
+    this.auditionToken = 0;
     this.channelState = Array.from({ length: 16 }, () => ({
       muted: false, solo: false, volume: 1, pan: 0, transpose: 0, program: null, lockedProgram: false
     }));
@@ -66,7 +70,8 @@ export class AudioEngine extends EventTarget {
     if (!response.ok) throw new Error(`Could not load the bundled SoundFont (${response.status}).`);
     const defaultBank = await response.arrayBuffer();
     this.soundBanks.set('default', {
-      id: 'default', name: 'GeneralUser GS', buffer: defaultBank.slice(0), bankOffset: 0, builtIn: true, enabled: true
+      id: 'default', name: 'GeneralUser GS', buffer: defaultBank.slice(0), bankOffset: 0,
+      builtIn: true, enabled: true, details: null
     });
     this.bankOrder = ['default'];
     await this.synth.soundBankManager.addSoundBank(defaultBank.slice(0), 'default', 0);
@@ -247,14 +252,16 @@ export class AudioEngine extends EventTarget {
   async addSoundBank(arrayBuffer, name, bankOffset = 0, sourcePath = null, options = {}) {
     await this.ensureReady();
     const id = options.id || `custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const normalizedOffset = normalizeBankOffset(bankOffset);
     const entry = {
       id,
       name,
       buffer: arrayBuffer.slice(0),
-      bankOffset: Number(bankOffset) || 0,
+      bankOffset: normalizedOffset,
       builtIn: false,
       sourcePath,
-      enabled: options.enabled !== false
+      enabled: options.enabled !== false,
+      details: options.details || null
     };
     this.soundBanks.set(id, entry);
     this.bankOrder = this.bankOrder.filter((item) => item !== id);
@@ -262,6 +269,7 @@ export class AudioEngine extends EventTarget {
     else if (Number.isInteger(options.position)) this.bankOrder.splice(clamp(options.position, 0, this.bankOrder.length), 0, id);
     else this.bankOrder.unshift(id);
     if (entry.enabled) await this.synth.soundBankManager.addSoundBank(arrayBuffer.slice(0), id, entry.bankOffset);
+    this.soundBankSolo = null;
     this._syncSoundBankPriority();
     this.dispatchEvent(new CustomEvent('soundbankschange'));
     return id;
@@ -270,6 +278,7 @@ export class AudioEngine extends EventTarget {
   setSoundBankOrder(ids) {
     const requested = [...new Set((ids || []).filter((id) => this.soundBanks.has(id)))];
     this.bankOrder = [...requested, ...this.bankOrder.filter((id) => !requested.includes(id) && this.soundBanks.has(id))];
+    this.soundBankSolo = null;
     this._syncSoundBankPriority();
     this.dispatchEvent(new CustomEvent('soundbankschange'));
     return [...this.bankOrder];
@@ -281,6 +290,7 @@ export class AudioEngine extends EventTarget {
     if (!entry) throw new Error('That SoundFont is no longer loaded.');
     const nextEnabled = Boolean(enabled);
     if (entry.enabled === nextEnabled) return;
+    this.soundBankSolo = null;
     if (!nextEnabled && this._enabledBankIds().length <= 1) {
       throw new Error('At least one SoundFont must remain enabled.');
     }
@@ -309,6 +319,7 @@ export class AudioEngine extends EventTarget {
     if (entry.enabled) await this.synth.soundBankManager.deleteSoundBank(id);
     this.soundBanks.delete(id);
     this.bankOrder = this.bankOrder.filter((item) => item !== id);
+    this.soundBankSolo = null;
     this._syncSoundBankPriority();
     this.dispatchEvent(new CustomEvent('soundbankschange'));
   }
@@ -318,8 +329,125 @@ export class AudioEngine extends EventTarget {
     return this._orderedSoundBanks().map(({ buffer, ...item }) => ({
       ...item,
       size: buffer.byteLength,
-      priority: item.enabled ? ++activePriority : null
+      priority: item.enabled ? ++activePriority : null,
+      soloed: this.soundBankSolo?.id === item.id
     }));
+  }
+
+  async inspectSoundBank(id) {
+    const entry = this.soundBanks.get(id);
+    if (!entry) throw new Error('That SoundFont is no longer loaded.');
+    if (!entry.details) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      entry.details = summarizeSoundBank(SoundBankLoader.fromArrayBuffer(entry.buffer.slice(0)));
+      this.dispatchEvent(new CustomEvent('soundbankschange'));
+    }
+    return entry.details;
+  }
+
+  async setSoundBankOffset(id, bankOffset) {
+    await this.ensureReady();
+    const entry = this.soundBanks.get(id);
+    if (!entry) throw new Error('That SoundFont is no longer loaded.');
+    const nextOffset = normalizeBankOffset(bankOffset);
+    if (entry.bankOffset === nextOffset) return nextOffset;
+    entry.bankOffset = nextOffset;
+    if (entry.enabled) await this.synth.soundBankManager.addSoundBank(entry.buffer.slice(0), id, nextOffset);
+    this._syncSoundBankPriority();
+    this.applyChannelState();
+    this.dispatchEvent(new CustomEvent('soundbankschange'));
+    return nextOffset;
+  }
+
+  async enableAllSoundBanks() {
+    await this.ensureReady();
+    for (const entry of this._orderedSoundBanks()) {
+      if (entry.enabled) continue;
+      await this.synth.soundBankManager.addSoundBank(entry.buffer.slice(0), entry.id, entry.bankOffset);
+      entry.enabled = true;
+    }
+    this.soundBankSolo = null;
+    this._syncSoundBankPriority();
+    this.applyChannelState();
+    this.dispatchEvent(new CustomEvent('soundbankschange'));
+  }
+
+  async toggleSoundBankSolo(id) {
+    await this.ensureReady();
+    const target = this.soundBanks.get(id);
+    if (!target) throw new Error('That SoundFont is no longer loaded.');
+    if (this.soundBankSolo?.id === id) {
+      const snapshot = this.soundBankSolo;
+      for (const entry of this._orderedSoundBanks()) {
+        if (snapshot.enabledIds.includes(entry.id) && !entry.enabled) {
+          await this.synth.soundBankManager.addSoundBank(entry.buffer.slice(0), entry.id, entry.bankOffset);
+          entry.enabled = true;
+        }
+      }
+      for (const entry of this._orderedSoundBanks()) {
+        if (!snapshot.enabledIds.includes(entry.id) && entry.enabled) {
+          await this.synth.soundBankManager.deleteSoundBank(entry.id);
+          entry.enabled = false;
+        }
+      }
+      this.soundBankSolo = null;
+    } else {
+      const enabledIds = this._enabledBankIds();
+      if (!target.enabled) {
+        await this.synth.soundBankManager.addSoundBank(target.buffer.slice(0), target.id, target.bankOffset);
+        target.enabled = true;
+      }
+      for (const entry of this._orderedSoundBanks()) {
+        if (entry.id === id || !entry.enabled) continue;
+        await this.synth.soundBankManager.deleteSoundBank(entry.id);
+        entry.enabled = false;
+      }
+      this.soundBankSolo = { id, enabledIds };
+    }
+    this._syncSoundBankPriority();
+    this.applyChannelState();
+    this.dispatchEvent(new CustomEvent('soundbankschange'));
+    return Boolean(this.soundBankSolo);
+  }
+
+  async auditionSoundBank(id, preset = {}, options = {}) {
+    await this.ensureReady();
+    await this.resumeContext();
+    const entry = this.soundBanks.get(id);
+    if (!entry) throw new Error('That SoundFont is no longer loaded.');
+    const token = ++this.auditionToken;
+    const wasTemporarilyAdded = !entry.enabled;
+    const originalPriority = [...this.synth.soundBankManager.priorityOrder];
+    if (wasTemporarilyAdded) {
+      await this.synth.soundBankManager.addSoundBank(entry.buffer.slice(0), entry.id, entry.bankOffset);
+    }
+    this.synth.soundBankManager.priorityOrder = [entry.id, ...originalPriority.filter((bankId) => bankId !== entry.id)];
+
+    if (this.auditionChannel === null) {
+      this.auditionChannel = this.synth.midiChannels.length;
+      this.synth.addNewChannel();
+    }
+    const channel = this.auditionChannel;
+    const note = clamp(Math.round(Number(options.note) || (preset.isDrum ? 36 : 60)), 0, 127);
+    const velocity = clamp(Math.round(Number(options.velocity) || 105), 1, 127);
+    const duration = clamp(Number(options.duration) || 0.9, 0.1, 4);
+    const bankMSB = preset.isDrum ? 0 : clamp((Number(preset.bankMSB) || 0) + entry.bankOffset, 0, 127);
+    const bankLSB = clamp(Number(preset.bankLSB) || 0, 0, 127);
+    const program = clamp(Math.round(Number(preset.program) || 0), 0, 127);
+    this.synth.midiChannels[channel]?.setSystemParameter('isMuted', false);
+    this.synth.midiChannels[channel]?.setSystemParameter('gain', 1);
+    this.synth.controllerChange(channel, MIDIControllers.bankSelect, bankMSB);
+    this.synth.controllerChange(channel, MIDIControllers.bankSelectLSB, bankLSB);
+    this.synth.programChange(channel, program);
+    this.synth.noteOn(channel, note, velocity);
+    await new Promise((resolve) => setTimeout(resolve, duration * 1000));
+    this.synth.noteOff(channel, note);
+
+    if (token === this.auditionToken) {
+      const availablePriority = originalPriority.filter((bankId) => this.soundBanks.get(bankId)?.enabled);
+      if (availablePriority.length) this.synth.soundBankManager.priorityOrder = availablePriority;
+      if (wasTemporarilyAdded && !entry.enabled) await this.synth.soundBankManager.deleteSoundBank(entry.id);
+    }
   }
 
   setMetronome(enabled) {
@@ -364,6 +492,12 @@ export class AudioEngine extends EventTarget {
   getSpectrum(target = new Uint8Array(256)) {
     if (!this.analyser) return target.fill(0);
     this.analyser.getByteFrequencyData(target);
+    return target;
+  }
+
+  getWaveform(target = new Uint8Array(512)) {
+    if (!this.analyser) return target.fill(128);
+    this.analyser.getByteTimeDomainData(target);
     return target;
   }
 

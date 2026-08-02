@@ -5,7 +5,6 @@ import { MIDIModel } from './midi-model.js';
 import { analyzeChords, chordAt } from './chords.js';
 import {
   APP_NAME,
-  CHANNEL_COLORS,
   DEFAULT_CHANNEL_STATE,
   GM_PROGRAMS,
   PERSPECTIVES,
@@ -13,9 +12,11 @@ import {
   clamp,
   formatTime
 } from './constants.js';
-import { Visualizer } from './visualizer.js';
+import { Visualizer, mixerSliderColor } from './visualizer.js';
+import { visualizerScrollSeconds, visualizerZoomMultiplier } from './visualizer-interaction.js';
 import { AppStore } from './storage.js';
 import { readDescriptor } from './file-reader.js';
+import { inspectMIDI, repairMIDI } from './midi-repair.js';
 import {
   moveSoundBank,
   resolveSavedSoundBankOrder,
@@ -50,11 +51,17 @@ const state = {
   dirtyVisual: true,
   seeking: false,
   pressedPianoNote: null,
-  maxTempo: Number(store.settings.maxTempo) || 4
+  maxTempo: Number(store.settings.maxTempo) || 4,
+  repairReport: null
 };
 let persistedSoundFontsRestored = false;
 let draggedSoundFontId = null;
+let expandedSoundFontId = null;
 let incomingFileQueue = Promise.resolve();
+let pendingWheelSeek = null;
+let wheelSeekFrame = 0;
+const spectrumBuffer = new Uint8Array(256);
+const waveformBuffer = new Uint8Array(512);
 
 function toast(title, message = '', type = '') {
   const item = document.createElement('div');
@@ -111,6 +118,7 @@ async function loadDescriptor(descriptor, options = {}) {
     state.file = { ...descriptor, size: descriptor.size || buffer.byteLength };
     state.model = model;
     state.analysis = null;
+    state.repairReport = null;
     state.markers = model.markers.map((marker) => ({ ...marker }));
     state.channelSettings = Array.from({ length: 16 }, DEFAULT_CHANNEL_STATE);
     initializeChannelsFromModel(model);
@@ -249,9 +257,15 @@ function persistSoundFontStack() {
   store.updateSettings({
     soundFonts: banks
       .filter((bank) => !bank.builtIn && bank.sourcePath)
-      .map((bank) => ({ name: bank.name, path: bank.sourcePath, enabled: bank.enabled !== false })),
+      .map((bank) => ({
+        name: bank.name,
+        path: bank.sourcePath,
+        enabled: bank.enabled !== false,
+        bankOffset: bank.bankOffset || 0
+      })),
     soundFontOrder: persistentBanks.map(soundFontStorageKey),
-    defaultSoundFontEnabled: defaultBank?.enabled !== false
+    defaultSoundFontEnabled: defaultBank?.enabled !== false,
+    defaultSoundFontOffset: defaultBank?.bankOffset || 0
   });
 }
 
@@ -263,7 +277,7 @@ async function restorePersistedSoundFonts() {
     try {
       const descriptor = await window.native.openKnownFile(saved.path);
       const buffer = await readDescriptor(descriptor);
-      await engine.addSoundBank(buffer, saved.name || descriptor.name, 0, saved.path, {
+      await engine.addSoundBank(buffer, saved.name || descriptor.name, saved.bankOffset || 0, saved.path, {
         enabled: saved.enabled !== false,
         position: 'bottom'
       });
@@ -276,6 +290,10 @@ async function restorePersistedSoundFonts() {
     store.settings.soundFontOrder,
     savedFonts
   ));
+  if (store.settings.defaultSoundFontOffset) {
+    try { await engine.setSoundBankOffset('default', store.settings.defaultSoundFontOffset); }
+    catch (error) { console.warn('Could not restore the bundled SoundFont bank offset.', error); }
+  }
   if (store.settings.defaultSoundFontEnabled === false) {
     try { await engine.setSoundBankEnabled('default', false); }
     catch (error) { console.warn('The bundled fallback SoundFont had to remain enabled.', error); }
@@ -323,6 +341,19 @@ function seekTo(seconds) {
   if (!state.model) return;
   engine.seek(clamp(seconds, 0, state.model.duration));
   state.dirtyVisual = true;
+}
+
+function queueWheelSeek(deltaSeconds) {
+  if (!state.model || !Number.isFinite(deltaSeconds) || deltaSeconds === 0) return;
+  const origin = pendingWheelSeek ?? engine.currentTime;
+  pendingWheelSeek = clamp(origin + deltaSeconds, 0, state.model.duration);
+  if (wheelSeekFrame) return;
+  wheelSeekFrame = requestAnimationFrame(() => {
+    const target = pendingWheelSeek;
+    pendingWheelSeek = null;
+    wheelSeekFrame = 0;
+    if (target !== null) seekTo(target);
+  });
 }
 
 function queueStep(offset) {
@@ -374,9 +405,10 @@ function createMixerStrip(channel) {
   const setting = state.channelSettings[channel];
   const tracks = state.model.tracks.filter((track) => track.channels.includes(channel));
   const name = channel === 9 ? 'Drum kit' : (tracks.map((track) => track.name).filter(Boolean).join(' / ') || `Channel ${channel + 1}`);
+  const stripColor = mixerSliderColor(tracks, channel, visualizer.colorMode);
   const strip = document.createElement('div');
   strip.className = `mixer-strip ${setting.muted ? 'muted' : ''} ${setting.solo ? 'solo' : ''}`;
-  strip.style.setProperty('--strip-color', CHANNEL_COLORS[channel]);
+  strip.style.setProperty('--strip-color', stripColor);
   strip.dataset.channel = String(channel);
 
   const heading = document.createElement('div');
@@ -396,9 +428,15 @@ function createMixerStrip(channel) {
   volume.type = 'range';
   volume.min = '0'; volume.max = '1.5'; volume.step = '0.01'; volume.value = String(setting.volume);
   volume.title = `Channel volume ${Math.round(setting.volume * 100)}%`;
+  const updateVolumeFill = () => {
+    const percent = clamp(Number(volume.value) / Number(volume.max) * 100, 0, 100);
+    volume.style.setProperty('--slider-fill', `${percent}%`);
+  };
+  updateVolumeFill();
   volume.addEventListener('input', () => {
     setting.volume = Number(volume.value);
     volume.title = `Channel volume ${Math.round(setting.volume * 100)}%`;
+    updateVolumeFill();
     engine.setChannelState(channel, { volume: setting.volume });
     saveFileSettings();
   });
@@ -657,21 +695,30 @@ function renderSoundFonts() {
   banks.forEach((bank, index) => {
     const row = document.createElement('div'); row.className = 'soundfont-row'; row.dataset.bankId = bank.id;
     row.classList.toggle('disabled', !bank.enabled);
+    row.classList.toggle('expanded', expandedSoundFontId === bank.id);
     const handle = document.createElement('button');
     handle.className = 'bank-drag-handle'; handle.type = 'button'; handle.textContent = '⠿'; handle.draggable = true;
     handle.title = 'Drag to change priority'; handle.setAttribute('aria-label', `Move ${bank.name}`); handle.setAttribute('aria-grabbed', 'false');
-    const icon = document.createElement('span'); icon.className = 'bank-icon'; icon.textContent = 'SF';
+    const icon = document.createElement('span'); icon.className = 'bank-icon'; icon.textContent = bank.details?.type || 'SF';
     const copy = document.createElement('div'); copy.className = 'soundfont-copy';
     const name = document.createElement('strong'); name.textContent = bank.name;
     const status = bank.enabled ? `Active priority ${bank.priority}` : `Disabled · stack position ${index + 1}`;
-    const meta = document.createElement('small'); meta.textContent = `${formatBytes(bank.size)} · ${bank.builtIn ? 'Built-in' : 'Custom'} · ${status}`;
+    const offsetText = bank.bankOffset ? ` · bank offset +${bank.bankOffset}` : '';
+    const presetText = bank.details ? ` · ${bank.details.presetCount} presets` : '';
+    const meta = document.createElement('small'); meta.textContent = `${formatBytes(bank.size)} · ${bank.builtIn ? 'Built-in' : 'Custom'}${presetText}${offsetText} · ${status}`;
     copy.append(name, meta);
     const enabledLabel = document.createElement('label'); enabledLabel.className = 'bank-enabled-toggle';
     const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = bank.enabled !== false;
     enabled.setAttribute('aria-label', `Enable ${bank.name}`);
     const enabledText = document.createElement('span'); enabledText.textContent = 'Enabled';
     enabledLabel.append(enabled, enabledText);
-    row.append(handle, icon, copy, enabledLabel);
+    const actions = document.createElement('div'); actions.className = 'bank-actions';
+    const detailsButton = document.createElement('button'); detailsButton.className = 'bank-tool-button'; detailsButton.type = 'button';
+    detailsButton.textContent = expandedSoundFontId === bank.id ? 'Hide tools' : 'Tools';
+    const solo = document.createElement('button'); solo.className = `bank-tool-button ${bank.soloed ? 'active' : ''}`; solo.type = 'button';
+    solo.textContent = bank.soloed ? 'Unsolo' : 'Solo';
+    actions.append(detailsButton, solo);
+    row.append(handle, icon, copy, enabledLabel, actions);
 
     handle.addEventListener('dragstart', (event) => {
       draggedSoundFontId = bank.id;
@@ -725,6 +772,30 @@ function renderSoundFonts() {
         friendlyError(error);
       }
     });
+    detailsButton.addEventListener('click', async () => {
+      if (expandedSoundFontId === bank.id) {
+        expandedSoundFontId = null;
+        renderSoundFonts();
+        return;
+      }
+      expandedSoundFontId = bank.id;
+      if (!bank.details) {
+        detailsButton.disabled = true;
+        detailsButton.textContent = 'Inspecting…';
+        try { await engine.inspectSoundBank(bank.id); }
+        catch (error) { friendlyError(error); }
+      }
+      renderSoundFonts();
+    });
+    solo.addEventListener('click', async () => {
+      solo.disabled = true;
+      try {
+        const soloed = await engine.toggleSoundBankSolo(bank.id);
+        persistSoundFontStack();
+        renderSoundFonts();
+        toast(soloed ? 'SoundFont soloed' : 'SoundFont stack restored', bank.name, 'success');
+      } catch (error) { friendlyError(error); renderSoundFonts(); }
+    });
     if (!bank.builtIn) {
       const remove = document.createElement('button'); remove.className = 'remove-bank'; remove.type = 'button'; remove.textContent = 'Remove';
       remove.addEventListener('click', async () => {
@@ -734,10 +805,90 @@ function renderSoundFonts() {
           renderSoundFonts();
         } catch (error) { friendlyError(error); }
       });
-      row.append(remove);
+      actions.append(remove);
+    }
+    if (expandedSoundFontId === bank.id) {
+      row.append(createSoundFontTools(bank));
     }
     root.append(row);
   });
+}
+
+function createSoundFontTools(bank) {
+  const tools = document.createElement('div');
+  tools.className = 'soundfont-tools';
+  const details = bank.details;
+
+  const info = document.createElement('div');
+  info.className = 'soundfont-metadata';
+  if (details) {
+    const title = details.internalName && details.internalName !== bank.name ? details.internalName : `${details.type} sound bank`;
+    const byline = [details.author, details.product, details.version ? `v${details.version}` : ''].filter(Boolean).join(' · ');
+    info.innerHTML = `<strong></strong><span></span><small></small>`;
+    $('strong', info).textContent = title;
+    $('span', info).textContent = byline || 'No author metadata';
+    $('small', info).textContent = `${details.melodicPresetCount} melodic · ${details.drumPresetCount} drum · ${details.instrumentCount} instruments · ${details.sampleCount} samples`;
+  } else {
+    info.textContent = 'Preset metadata could not be read, but priority and bank-offset tools are still available.';
+  }
+
+  const controls = document.createElement('div');
+  controls.className = 'soundfont-tool-grid';
+  const offsetLabel = document.createElement('label');
+  offsetLabel.innerHTML = '<span>Bank offset</span>';
+  const offset = document.createElement('input'); offset.type = 'number'; offset.min = '0'; offset.max = '127'; offset.step = '1'; offset.value = String(bank.bankOffset || 0);
+  offset.title = 'Shift every preset to a different MIDI bank MSB';
+  offsetLabel.append(offset);
+
+  const moveTop = document.createElement('button'); moveTop.type = 'button'; moveTop.className = 'bank-tool-button'; moveTop.textContent = 'Move to top';
+  const moveBottom = document.createElement('button'); moveBottom.type = 'button'; moveBottom.className = 'bank-tool-button'; moveBottom.textContent = 'Move to bottom';
+  controls.append(offsetLabel, moveTop, moveBottom);
+
+  offset.addEventListener('change', async () => {
+    offset.disabled = true;
+    try {
+      const appliedOffset = await engine.setSoundBankOffset(bank.id, Number(offset.value));
+      persistSoundFontStack();
+      renderSoundFonts();
+      toast('Bank offset updated', `${bank.name} now uses +${appliedOffset}`, 'success');
+    } catch (error) { friendlyError(error); renderSoundFonts(); }
+  });
+  moveTop.addEventListener('click', () => moveSoundFontToEdge(bank.id, true));
+  moveBottom.addEventListener('click', () => moveSoundFontToEdge(bank.id, false));
+
+  tools.append(info, controls);
+  if (details?.presets?.length) {
+    const audition = document.createElement('div');
+    audition.className = 'soundfont-audition';
+    const presetSelect = document.createElement('select');
+    details.presets.forEach((preset, presetIndex) => {
+      const prefix = preset.isDrum ? 'DRUM' : `B${preset.bankMSB}:${preset.bankLSB}`;
+      presetSelect.append(new Option(`${prefix} · P${preset.program + 1} · ${preset.name}`, String(presetIndex)));
+    });
+    const firstMelodic = details.presets.findIndex((preset) => !preset.isDrum);
+    presetSelect.value = String(Math.max(0, firstMelodic));
+    const note = document.createElement('input'); note.type = 'number'; note.min = '0'; note.max = '127'; note.value = '60'; note.title = 'Audition MIDI note';
+    const velocity = document.createElement('input'); velocity.type = 'number'; velocity.min = '1'; velocity.max = '127'; velocity.value = '105'; velocity.title = 'Audition velocity';
+    const play = document.createElement('button'); play.type = 'button'; play.className = 'button accent'; play.textContent = '▶ Audition preset';
+    audition.append(presetSelect, note, velocity, play);
+    play.addEventListener('click', async () => {
+      const preset = details.presets[Number(presetSelect.value)] || details.presets[0];
+      play.disabled = true; play.textContent = 'Playing…';
+      try { await engine.auditionSoundBank(bank.id, preset, { note: Number(note.value), velocity: Number(velocity.value) }); }
+      catch (error) { friendlyError(error); }
+      finally { play.disabled = false; play.textContent = '▶ Audition preset'; }
+    });
+    tools.append(audition);
+  }
+  return tools;
+}
+
+function moveSoundFontToEdge(id, top) {
+  const ids = engine.getSoundBanks().map((bank) => bank.id).filter((bankId) => bankId !== id);
+  engine.setSoundBankOrder(top ? [id, ...ids] : [...ids, id]);
+  persistSoundFontStack();
+  renderSoundFonts();
+  focusSoundFontHandle(id);
 }
 
 function clearSoundFontDropIndicators() {
@@ -860,6 +1011,9 @@ function animationLoop(timestamp) {
       updateStatus(time);
       visualizer.activeNotes = flattenActiveNotes();
       visualizer.channelState = state.channelSettings;
+      if (state.view === 'spectrum') {
+        visualizer.setAudioData(engine.getSpectrum(spectrumBuffer), engine.getWaveform(waveformBuffer));
+      }
       if (timestamp - lastRowsUpdate > 180) {
         updateCurrentRows(time); updateMeters(); lastRowsUpdate = timestamp;
       }
@@ -937,6 +1091,87 @@ async function exportLyrics() {
   $('#export-dialog').close();
 }
 
+function renderRepairSummary(report) {
+  const root = $('#repair-summary');
+  root.replaceChildren();
+  if (!report) {
+    const scanning = document.createElement('div');
+    scanning.className = 'repair-scanning';
+    scanning.textContent = 'Scanning MIDI event structure…';
+    root.append(scanning);
+    $('#repair-export').disabled = true;
+    return;
+  }
+  const headline = document.createElement('div');
+  headline.className = `repair-headline ${report.healthy ? 'healthy' : report.errorCount ? 'damaged' : 'warning'}`;
+  const badge = document.createElement('span'); badge.textContent = report.healthy ? '✓' : report.errorCount ? '!' : 'i';
+  const copy = document.createElement('div');
+  const title = document.createElement('strong');
+  title.textContent = report.healthy ? 'No structural problems detected' : `${report.totalIssues.toLocaleString()} repairable event issue${report.totalIssues === 1 ? '' : 's'} found`;
+  const meta = document.createElement('small');
+  meta.textContent = `${report.trackCount} tracks · ${report.eventCount.toLocaleString()} events · original remains untouched`;
+  copy.append(title, meta); headline.append(badge, copy); root.append(headline);
+
+  if (report.issues.length) {
+    const list = document.createElement('div'); list.className = 'repair-issue-list';
+    for (const issue of report.issues) {
+      const item = document.createElement('div'); item.className = `repair-issue ${issue.severity}`;
+      const count = document.createElement('strong'); count.textContent = issue.count.toLocaleString();
+      const description = document.createElement('span');
+      const label = document.createElement('b'); label.textContent = issue.label;
+      const detail = document.createElement('small'); detail.textContent = issue.description;
+      description.append(label, detail); item.append(count, description); list.append(item);
+    }
+    root.append(list);
+  }
+  $('#repair-export').disabled = report.healthy;
+}
+
+async function openRepairTool() {
+  if (!state.model) return toast('Open a MIDI file first', 'The repair scanner needs a loaded song.');
+  $('#repair-dialog').showModal();
+  renderRepairSummary(null);
+  await nextFrame();
+  try {
+    state.repairReport = inspectMIDI(state.model.arrayBuffer);
+    renderRepairSummary(state.repairReport);
+  } catch (error) {
+    $('#repair-dialog').close();
+    friendlyError(error);
+  }
+}
+
+async function exportRepairedMIDI() {
+  if (!state.model) return;
+  const button = $('#repair-export');
+  button.disabled = true;
+  button.textContent = 'Repairing…';
+  await nextFrame();
+  try {
+    const result = repairMIDI(state.model.arrayBuffer, {
+      closeStuckNotes: $('#repair-stuck').checked,
+      removeOrphanNoteOffs: $('#repair-orphans').checked,
+      resolveOverlaps: $('#repair-overlaps').checked,
+      normalizeZeroVelocity: $('#repair-zero-velocity').checked,
+      fixInvalidData: $('#repair-values').checked,
+      removeExactDuplicates: $('#repair-duplicates').checked,
+      normalizeTrackEndings: $('#repair-endings').checked,
+      clampTempos: $('#repair-tempos').checked
+    });
+    if (!result.changed) {
+      toast('No selected repairs were needed', 'Enable another repair operation or close the MIDI Doctor.');
+      return;
+    }
+    await saveBlob(new Blob([result.buffer], { type: 'audio/midi' }), `${exportBaseName()} - Repaired.mid`);
+    $('#repair-dialog').close();
+    toast('MIDI repair complete', `${result.fixedTotal.toLocaleString()} event repairs applied to the saved copy.`, 'success');
+  } catch (error) { friendlyError(error); }
+  finally {
+    button.textContent = 'Repair & save copy';
+    button.disabled = state.repairReport?.healthy ?? true;
+  }
+}
+
 function formatBytes(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -996,6 +1231,8 @@ function bindUI() {
   visualizer.showPiano = store.settings.showPiano !== false;
   visualizer.showLabels = store.settings.showLabels !== false;
   visualizer.showGrid = store.settings.showGrid !== false;
+  visualizer.spectrumTheme = store.settings.spectrumTheme || 'classic';
+  visualizer.spectrumGain = Number(store.settings.spectrumGain) || 1;
   $('#color-mode').value = visualizer.colorMode;
   engine.setMasterVolume(store.settings.masterVolume ?? .82);
   engine.setMetronome(Boolean(store.settings.metronome));
@@ -1072,7 +1309,7 @@ function bindUI() {
 
   $('#color-mode').addEventListener('change', () => {
     visualizer.colorMode = $('#color-mode').value;
-    store.updateSettings({ colorMode: visualizer.colorMode }); state.dirtyVisual = true;
+    store.updateSettings({ colorMode: visualizer.colorMode }); renderMixer(); state.dirtyVisual = true;
   });
   $('#zoom-in').addEventListener('click', () => changeZoom(1.2));
   $('#zoom-out').addEventListener('click', () => changeZoom(1 / 1.2));
@@ -1134,6 +1371,16 @@ function bindUI() {
       for (const descriptor of descriptors || []) await loadSoundFontDescriptor(descriptor);
     } catch (error) { friendlyError(error); }
   });
+  $('#enable-all-soundfonts').addEventListener('click', async () => {
+    try {
+      await engine.enableAllSoundBanks();
+      persistSoundFontStack();
+      renderSoundFonts();
+      toast('All SoundFonts enabled', 'The current priority order has been preserved.', 'success');
+    } catch (error) { friendlyError(error); }
+  });
+  $('#repair-button').addEventListener('click', openRepairTool);
+  $('#repair-export').addEventListener('click', exportRepairedMIDI);
   $('#midi-devices-button').addEventListener('click', () => $('#midi-dialog').showModal());
   $('#scan-midi').addEventListener('click', scanMIDIDevices);
   $('#midi-input-select').addEventListener('change', () => engine.selectMIDIInput($('#midi-input-select').value));
@@ -1169,7 +1416,19 @@ function bindUI() {
     state.pressedPianoNote = null;
   });
   canvas.addEventListener('wheel', (event) => {
-    if (!event.ctrlKey) return; event.preventDefault(); changeZoom(event.deltaY < 0 ? 1.1 : 1 / 1.1);
+    const pageSize = canvas.clientHeight || 800;
+    if (event.ctrlKey) {
+      event.preventDefault();
+      setZoom(visualizer.zoom * visualizerZoomMultiplier(event.deltaX, event.deltaY, event.deltaMode, pageSize));
+      return;
+    }
+    if (!state.model) return;
+    const deltaSeconds = visualizerScrollSeconds(
+      event.deltaX, event.deltaY, event.deltaMode, visualizer.zoom, state.view, pageSize
+    );
+    if (!deltaSeconds) return;
+    event.preventDefault();
+    queueWheelSeek(deltaSeconds);
   }, { passive: false });
 
   bindDragAndDrop();
@@ -1190,6 +1449,8 @@ function openSettings() {
   $('#show-piano-setting').checked = visualizer.showPiano;
   $('#show-labels-setting').checked = visualizer.showLabels;
   $('#show-grid-setting').checked = visualizer.showGrid;
+  $('#spectrum-theme-setting').value = visualizer.spectrumTheme;
+  $('#spectrum-gain-setting').value = String(visualizer.spectrumGain);
   $('#theme-setting').value = store.settings.theme || 'midnight';
   $('#karaoke-color-setting').value = store.settings.karaokeColor || 'gray';
   $('#karaoke-length-setting').value = String(store.settings.karaokeLength || 80);
@@ -1207,6 +1468,14 @@ function bindSettingsFields() {
   $('#show-piano-setting').addEventListener('change', () => { visualizer.showPiano = $('#show-piano-setting').checked; store.updateSettings({ showPiano: visualizer.showPiano }); state.dirtyVisual = true; });
   $('#show-labels-setting').addEventListener('change', () => { visualizer.showLabels = $('#show-labels-setting').checked; store.updateSettings({ showLabels: visualizer.showLabels }); state.dirtyVisual = true; });
   $('#show-grid-setting').addEventListener('change', () => { visualizer.showGrid = $('#show-grid-setting').checked; store.updateSettings({ showGrid: visualizer.showGrid }); state.dirtyVisual = true; });
+  $('#spectrum-theme-setting').addEventListener('change', () => {
+    visualizer.spectrumTheme = $('#spectrum-theme-setting').value;
+    store.updateSettings({ spectrumTheme: visualizer.spectrumTheme }); state.dirtyVisual = true;
+  });
+  $('#spectrum-gain-setting').addEventListener('change', () => {
+    visualizer.spectrumGain = Number($('#spectrum-gain-setting').value) || 1;
+    store.updateSettings({ spectrumGain: visualizer.spectrumGain }); state.dirtyVisual = true;
+  });
   $('#theme-setting').addEventListener('change', () => {
     document.body.classList.remove('theme-midnight', 'theme-violet', 'theme-graphite');
     document.body.classList.add(`theme-${$('#theme-setting').value}`); store.updateSettings({ theme: $('#theme-setting').value });
@@ -1283,7 +1552,7 @@ function bindKeyboard() {
     else if (event.key === ']') setTranspose(state.transpose + 1);
     else if (event.key === '-' || event.key === '_') setRate(state.rate - .05);
     else if (event.key === '=' || event.key === '+') setRate(state.rate + .05);
-    else if (/^[1-5]$/.test(event.key)) setView(VIEW_MODES[Number(event.key) - 1].id);
+    else if (/^[1-6]$/.test(event.key)) setView(VIEW_MODES[Number(event.key) - 1].id);
   });
 }
 

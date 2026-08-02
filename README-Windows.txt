@@ -1,14 +1,15 @@
-MIDI VOYAGER WINDOWS 1.1.1 (64-bit)
+MIDI VOYAGER WINDOWS 1.2.0 (64-bit)
 ================================================
 
-Version 1.1.1 adds a Windows installer, shortcuts, clean uninstall, MIDI Open
-with support and one consistent Windows-themed icon. Version 1.1.0 added the
-SoundFont priority controls and matching falling-note/piano-key colours.
+Version 1.2.0 adds advanced SoundFont inspection, offsets, soloing and audition;
+a Winamp-style spectrum analyser; and selectable, non-destructive MIDI repair.
+The installer still verifies its embedded payload before extraction.
 
 INSTALLER (recommended)
-  1. Run "MIDI Voyager Windows Setup 1.1.1.exe".
-  2. Press Install. Administrator permission is not required.
-  3. Start the app from the Start Menu or desktop shortcut.
+  1. Extract "MIDI Voyager Windows Setup 1.2.0.zip".
+  2. Run "MIDI Voyager Windows Setup 1.2.0.exe".
+  3. Press Install. Administrator permission is not required.
+  4. Start the app from the Start Menu or desktop shortcut.
 
 PORTABLE
   1. Extract the entire portable ZIP.
@@ -26,19 +27,21 @@ If startup-error.txt names VCRUNTIME140.dll, install Microsoft's Visual C++
 
 SUPPORTED WORKFLOWS
   - MIDI/KAR/RMID/XMF playback with bundled GeneralUser GS sounds
-  - SF2, SF3 and DLS sound-bank loading, priority ordering and enable controls
-  - Waterfall, piano roll, staff, karaoke and event views
+  - Advanced SF2/SF3/DLS rack: priority, enable, solo, offsets and audition
+  - Waterfall, piano roll, staff, karaoke, event and spectrum views
   - Per-channel mixer, instruments, transpose, tempo and master volume
   - Chord/key analysis, lyrics, markers, loops, metronome and count-in
   - Playlists, favourites, recent files, perspectives and settings backup
   - USB MIDI input/output (device and Windows Web MIDI support permitting)
   - Modified MIDI, WAV and lyrics/chords export
+  - MIDI health inspection and selectable repairs saved to a new file
 
 SHORTCUTS
   Ctrl+O       Open MIDI              Space         Play/pause
   Ctrl+E       Export                 Left/Right    Seek
   Ctrl+D       Add to favourites      [ and ]       Transpose
-  1 through 5  Change view            - and +       Tempo
+  1 through 6  Change view            - and +       Tempo
+  Mouse wheel  Seek in visualiser     Ctrl+wheel    Zoom visualiser
 
 NOTES
   - The installer and portable build target 64-bit Windows 10/11.

@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>MIDI Voyager Windows</title>
   <link rel="icon" href="./assets/icon.png">
-  <link rel="stylesheet" href="./styles.css?v=1.1.1">
+  <link rel="stylesheet" href="./styles.css?v=1.2.0">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -23,6 +23,7 @@
       <div id="view-switcher" class="segmented view-switcher" aria-label="Visualisation mode"></div>
       <button id="perspective-button" class="icon-button wide" type="button" title="Perspective"><span>◫</span><em id="perspective-label">Performance</em></button>
       <button id="soundfont-button" class="icon-button" type="button" title="SoundFonts">SF</button>
+      <button id="repair-button" class="icon-button" type="button" title="Inspect and repair MIDI">✚</button>
       <button id="midi-devices-button" class="icon-button" type="button" title="MIDI devices">⌁</button>
       <button id="settings-button" class="icon-button" type="button" title="Settings">⚙</button>
     </header>
@@ -49,7 +50,7 @@
 
       <main class="main-stage">
         <section id="visual-shell" class="visual-shell">
-          <canvas id="visualizer" aria-label="MIDI visualisation"></canvas>
+          <canvas id="visualizer" aria-label="MIDI visualisation" title="Scroll to move through the song; Ctrl+scroll to zoom"></canvas>
           <div id="visual-overlay" class="visual-overlay" hidden></div>
           <div class="visual-toolbar">
             <div class="status-pills">
@@ -171,6 +172,8 @@
             <label class="setting-row"><span><strong>Piano keyboard</strong><small>Show the playable keyboard in waterfall mode</small></span><input id="show-piano-setting" type="checkbox" checked></label>
             <label class="setting-row"><span><strong>Note labels</strong><small>Show note names when there is enough room</small></span><input id="show-labels-setting" type="checkbox" checked></label>
             <label class="setting-row"><span><strong>Beat grid</strong><small>Draw measure and beat guides</small></span><input id="show-grid-setting" type="checkbox" checked></label>
+            <label class="setting-row"><span><strong>Spectrum palette</strong><small>Colour treatment for the Winamp-style live analyser</small></span><select id="spectrum-theme-setting"><option value="classic">Classic fire</option><option value="ice">Electric ice</option><option value="rainbow">Rainbow drive</option></select></label>
+            <label class="setting-row"><span><strong>Spectrum sensitivity</strong><small>Boost quieter recordings in spectrum mode</small></span><select id="spectrum-gain-setting"><option value="0.8">Low</option><option value="1">Normal</option><option value="1.3">High</option><option value="1.65">Extreme</option></select></label>
             <label class="setting-row"><span><strong>Theme</strong><small>Application colour treatment</small></span><select id="theme-setting"><option value="midnight">Midnight cyan</option><option value="violet">Violet studio</option><option value="graphite">Graphite</option></select></label>
           </section>
           <section class="settings-page" data-settings-content="karaoke">
@@ -184,7 +187,7 @@
             <div class="button-row"><button id="export-settings" class="button" type="button">Export settings</button><button id="import-settings" class="button ghost" type="button">Import settings</button></div>
           </section>
           <section class="settings-page" data-settings-content="about">
-            <h3>MIDI Voyager Windows 1.1</h3>
+            <h3>MIDI Voyager Windows 1.2</h3>
             <p class="settings-copy">A clean-room Windows edition built for fast local MIDI playback and visualisation. Audio synthesis runs off the interface thread and uses the included GeneralUser GS SoundFont.</p>
             <p class="settings-copy">Supports MIDI formats 0, 1 and 2, KAR lyrics, RMIDI/XMF parsing, SF2/SF3/DLS sound banks, GS/XG messages, Web MIDI input/output and offline WAV rendering.</p>
           </section>
@@ -195,12 +198,32 @@
   </dialog>
 
   <dialog id="soundfont-dialog" class="modal">
-    <form method="dialog" class="modal-card">
-      <header><div><small>SOUND ENGINE</small><h2>SoundFonts</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
-      <p class="modal-copy">Stack SF2, SF3 or DLS sound banks. Drag entries to set priority and use the checkboxes to enable or disable them. Higher enabled entries override lower ones.</p>
+    <form method="dialog" class="modal-card wide-modal soundfont-modal">
+      <header><div><small>SOUND ENGINE</small><h2>Advanced SoundFont rack</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
+      <p class="modal-copy">Drag banks to set priority, solo or disable them, inspect every preset, audition sounds, and correct MIDI bank offsets. Higher enabled entries override lower ones.</p>
       <div id="soundfont-list" class="soundfont-list"></div>
-      <div class="button-row"><button id="add-soundfont" class="button primary" type="button">＋ Add SoundFont</button></div>
+      <div class="button-row"><button id="add-soundfont" class="button primary" type="button">＋ Add SoundFont</button><button id="enable-all-soundfonts" class="button ghost" type="button">Enable all</button></div>
       <footer><button class="button" value="default">Close</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="repair-dialog" class="modal">
+    <form method="dialog" class="modal-card wide-modal repair-modal">
+      <header><div><small>MIDI DOCTOR</small><h2>Inspect and repair MIDI</h2></div><button class="modal-close" value="cancel" aria-label="Close">×</button></header>
+      <p class="modal-copy">The original file is never overwritten. Voyager scans its event structure, then saves a repaired Standard MIDI copy using only the selected fixes.</p>
+      <div id="repair-summary" class="repair-summary"><div class="repair-scanning">Open a MIDI file to begin.</div></div>
+      <fieldset class="repair-options">
+        <legend>Repair operations</legend>
+        <label><input id="repair-stuck" type="checkbox" checked><span><strong>Close hanging notes</strong><small>Add missing note-offs at the track ending.</small></span></label>
+        <label><input id="repair-orphans" type="checkbox" checked><span><strong>Remove orphan note-offs</strong><small>Discard releases for notes that were never active.</small></span></label>
+        <label><input id="repair-overlaps" type="checkbox" checked><span><strong>Resolve overlapping retriggers</strong><small>Release a pitch before the same channel starts it again.</small></span></label>
+        <label><input id="repair-zero-velocity" type="checkbox" checked><span><strong>Normalise zero-velocity notes</strong><small>Convert legacy note-on zero events into explicit note-offs.</small></span></label>
+        <label><input id="repair-values" type="checkbox" checked><span><strong>Clamp invalid MIDI data</strong><small>Repair timing, channels, notes, velocities and controllers outside valid ranges.</small></span></label>
+        <label><input id="repair-duplicates" type="checkbox" checked><span><strong>Remove exact duplicates</strong><small>Clean repeated controller, program and metadata events at the same tick.</small></span></label>
+        <label><input id="repair-endings" type="checkbox" checked><span><strong>Normalise track endings</strong><small>Place exactly one end-of-track event after all musical data.</small></span></label>
+        <label><input id="repair-tempos" type="checkbox" checked><span><strong>Stabilise broken tempos</strong><small>Clamp implausible tempo events to the 20–300 BPM range.</small></span></label>
+      </fieldset>
+      <footer><button class="button" value="cancel">Cancel</button><button id="repair-export" class="button primary" type="button">Repair &amp; save copy</button></footer>
     </form>
   </dialog>
 
@@ -234,6 +257,6 @@
   </dialog>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=1.1.1"></script>
+  <script type="module" src="./app.js?v=1.2.0"></script>
 </body>
 </html>

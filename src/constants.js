@@ -40,6 +40,7 @@ export const VIEW_MODES = [
   { id: 'waterfall', label: 'Waterfall', icon: '▥' },
   { id: 'roll', label: 'Piano roll', icon: '▤' },
   { id: 'staff', label: 'Staff', icon: '𝄞' },
+  { id: 'spectrum', label: 'Spectrum', icon: '▥' },
   { id: 'karaoke', label: 'Karaoke', icon: 'Aa' },
   { id: 'events', label: 'Events', icon: '≡' }
 ];
@@ -56,6 +57,9 @@ export const PERSPECTIVES = {
   },
   analysis: {
     name: 'Analysis', view: 'staff', sidebar: true, bottomPanel: 'chords', compactHeader: false
+  },
+  spectrum: {
+    name: 'Winamp Spectrum', view: 'spectrum', sidebar: false, bottomPanel: 'mixer', compactHeader: true
   }
 };
 

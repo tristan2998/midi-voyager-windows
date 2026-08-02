@@ -11,6 +11,8 @@ $AppName = 'MIDI Voyager Windows'
 $AppVersion = '__APP_VERSION__'
 $AppExeName = 'MIDI Voyager Windows.exe'
 $PayloadMarker = '__PAYLOAD_MARKER__'
+$ExpectedPayloadLength = [Int64] '__PAYLOAD_LENGTH__'
+$ExpectedPayloadSha256 = '__PAYLOAD_SHA256__'
 $SetupPath = $env:MIDI_VOYAGER_SETUP_PATH
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\MIDI Voyager Windows'
 $InstallParent = Split-Path -Parent $InstallDir
@@ -38,11 +40,31 @@ function Extract-InstallerPayload([string] $Destination) {
         $MarkerIndex = $ProbeText.LastIndexOf($PayloadMarker, [StringComparison]::Ordinal)
         if ($MarkerIndex -lt 0) { throw 'The embedded setup payload is missing or damaged.' }
 
-        $InputStream.Position = $MarkerIndex + $PayloadMarker.Length
+        $PayloadStart = [Int64] $MarkerIndex + [Text.Encoding]::ASCII.GetByteCount($PayloadMarker)
+        $ActualPayloadLength = $InputStream.Length - $PayloadStart
+        if ($ActualPayloadLength -ne $ExpectedPayloadLength) {
+            throw ("This setup download is incomplete. The installer expected {0:N0} payload bytes but found {1:N0}. Delete this file and download the installer again." -f $ExpectedPayloadLength, $ActualPayloadLength)
+        }
+
+        $InputStream.Position = $PayloadStart
         $OutputStream = [IO.File]::Open($TemporaryZip, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $InputStream.CopyTo($OutputStream)
+        $OutputStream.Flush($true)
         $OutputStream.Dispose(); $OutputStream = $null
         $InputStream.Dispose(); $InputStream = $null
+
+        $Hasher = [Security.Cryptography.SHA256]::Create()
+        $HashStream = $null
+        try {
+            $HashStream = [IO.File]::OpenRead($TemporaryZip)
+            $ActualPayloadSha256 = -join ($Hasher.ComputeHash($HashStream) | ForEach-Object { $_.ToString('x2') })
+        } finally {
+            if ($HashStream) { $HashStream.Dispose() }
+            $Hasher.Dispose()
+        }
+        if (-not [String]::Equals($ActualPayloadSha256, $ExpectedPayloadSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'This setup download is damaged and failed its integrity check. Delete this file and download the installer again.'
+        }
         [IO.Compression.ZipFile]::ExtractToDirectory($TemporaryZip, $Destination)
     } finally {
         if ($OutputStream) { $OutputStream.Dispose() }

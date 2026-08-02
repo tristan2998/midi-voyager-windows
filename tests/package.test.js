@@ -11,16 +11,25 @@ test('desktop UI and native host retain the required integration points', async 
     readFile(new URL('../packaging/install.ps1', import.meta.url), 'utf8'),
     readFile(new URL('../packaging/launcher.S', import.meta.url), 'utf8')
   ]);
-  for (const id of ['open-midi', 'view-switcher', 'mixer-list', 'lyrics-list', 'export-wav', 'soundfont-file-input']) {
+  for (const id of [
+    'open-midi', 'view-switcher', 'mixer-list', 'lyrics-list', 'export-wav',
+    'soundfont-file-input', 'enable-all-soundfonts', 'repair-button', 'repair-dialog',
+    'spectrum-theme-setting', 'spectrum-gain-setting'
+  ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
-  assert.match(html, /app\.js\?v=1\.1\.1/);
+  assert.match(html, /app\.js\?v=1\.2\.0/);
   assert.match(html, /assets\/icon\.png/);
   assert.match(app, /new AudioEngine/);
   assert.match(app, /createDemoMIDI/);
   assert.match(app, /bank-drag-handle/);
   assert.match(app, /setSoundBankEnabled/);
+  assert.match(app, /toggleSoundBankSolo/);
+  assert.match(app, /auditionSoundBank/);
+  assert.match(app, /repairMIDI/);
+  assert.match(app, /state\.view === 'spectrum'/);
   assert.match(visualizer, /activeKeyColors/);
+  assert.match(visualizer, /_drawSpectrum/);
   assert.match(visualizer, /ctx\.rect\(0, 0, width, playY\)/);
   assert.match(host, /registerProtocol\('app'/);
   assert.match(host, /openFileDialog/);
@@ -36,4 +45,8 @@ test('desktop UI and native host retain the required integration points', async 
   assert.match(installer, /OpenWithProgids/);
   assert.match(installer, /RegisteredApplications/);
   assert.match(installer, /CurrentVersion\\Uninstall/);
+  assert.match(installer, /ExpectedPayloadLength/);
+  assert.match(installer, /ExpectedPayloadSha256/);
+  assert.match(installer, /setup download is incomplete/);
+  assert.match(installer, /Flush\(\$true\)/);
 });

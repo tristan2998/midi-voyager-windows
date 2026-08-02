@@ -17,9 +17,10 @@ const uiBuild = join(buildRoot, 'ui');
 const releaseRoot = join(root, 'release');
 const portableName = 'MIDI Voyager Windows';
 const portableRoot = join(releaseRoot, portableName);
-const appVersion = '1.1.1';
+const appVersion = '1.2.0';
 const portableZipName = `${portableName} ${appVersion} x64.zip`;
 const installerName = `${portableName} Setup ${appVersion}.exe`;
+const installerZipName = `${portableName} Setup ${appVersion}.zip`;
 const sourceZipName = `${portableName} Source ${appVersion}.zip`;
 const sourceFolderName = `${portableName} Source`;
 const vendorPackRoot = resolve(root, '..', 'vendor_packs');
@@ -170,6 +171,14 @@ async function stagePortable(launcher) {
   for (const file of ['index.js', 'js-bindings.js', 'package.json']) {
     await copyFile(join(root, 'node_modules', '@webviewjs', 'webview', file), join(webviewRoot, file));
   }
+  await removeWorkspaceCopyTemps(runtimeRoot, 'node.exe');
+}
+
+async function removeWorkspaceCopyTemps(directory, targetName) {
+  const prefix = `.${targetName}.`;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.startsWith(prefix)) await rm(join(directory, entry.name), { force: true });
+  }
 }
 
 function utf16Directives(value) {
@@ -277,10 +286,21 @@ async function buildInstaller(ico) {
   const prebuiltSetup = join(root, 'packaging', 'prebuilt', 'MIDI Voyager Windows Setup Stub.exe');
   await mkdir(installerBuildRoot, { recursive: true });
 
+  const payloadRoot = join(installerBuildRoot, 'payload');
+  const payloadZip = join(installerBuildRoot, 'payload.zip');
+  await cp(portableRoot, payloadRoot, { recursive: true });
+  await copyFile(join(root, 'packaging', 'uninstall.ps1'), join(payloadRoot, 'Uninstall.ps1'));
+  await createFlatZip(payloadRoot, payloadZip);
+  await verifyZip(payloadZip);
+  const payloadBytes = await readFile(payloadZip);
+  const payloadSha256 = createHash('sha256').update(payloadBytes).digest('hex');
+
   const installTemplate = await readFile(join(root, 'packaging', 'install.ps1'), 'utf8');
   const installScript = installTemplate
     .replaceAll('__APP_VERSION__', appVersion)
-    .replaceAll('__PAYLOAD_MARKER__', installerPayloadMarker);
+    .replaceAll('__PAYLOAD_MARKER__', installerPayloadMarker)
+    .replaceAll('__PAYLOAD_LENGTH__', String(payloadBytes.length))
+    .replaceAll('__PAYLOAD_SHA256__', payloadSha256);
   const compressedScript = gzipSync(Buffer.from(installScript, 'utf8'), { level: 9 }).toString('base64');
   const loader = `$b=[Convert]::FromBase64String('${compressedScript}');$m=New-Object IO.MemoryStream(,$b);$g=New-Object IO.Compression.GzipStream($m,[IO.Compression.CompressionMode]::Decompress);$r=New-Object IO.StreamReader($g,[Text.Encoding]::UTF8);Invoke-Expression ($r.ReadToEnd())`;
   const encodedLoader = Buffer.from(loader, 'utf16le').toString('base64');
@@ -309,21 +329,20 @@ async function buildInstaller(ico) {
   await mkdir(join(root, 'packaging', 'prebuilt'), { recursive: true });
   await copyFile(setupBase, prebuiltSetup);
 
-  const payloadRoot = join(installerBuildRoot, 'payload');
-  const payloadZip = join(installerBuildRoot, 'payload.zip');
-  await cp(portableRoot, payloadRoot, { recursive: true });
-  await copyFile(join(root, 'packaging', 'uninstall.ps1'), join(payloadRoot, 'Uninstall.ps1'));
-  await createFlatZip(payloadRoot, payloadZip);
-  await verifyZip(payloadZip);
-
   const setupOutput = join(releaseRoot, installerName);
   await copyFile(setupBase, setupOutput);
   await appendFile(setupOutput, Buffer.from(installerPayloadMarker, 'ascii'));
-  await appendFile(setupOutput, await readFile(payloadZip));
+  await appendFile(setupOutput, payloadBytes);
   const setupBytes = await readFile(setupOutput);
   const markerIndex = setupBytes.lastIndexOf(Buffer.from(installerPayloadMarker, 'ascii'));
   const payloadStart = markerIndex + installerPayloadMarker.length;
-  if (markerIndex < 0 || setupBytes.subarray(payloadStart, payloadStart + 2).toString('ascii') !== 'PK') {
+  const embeddedPayload = setupBytes.subarray(payloadStart);
+  if (
+    markerIndex < 0
+    || embeddedPayload.subarray(0, 2).toString('ascii') !== 'PK'
+    || embeddedPayload.length !== payloadBytes.length
+    || createHash('sha256').update(embeddedPayload).digest('hex') !== payloadSha256
+  ) {
     throw new Error('The generated installer payload could not be verified.');
   }
   return setupOutput;
@@ -375,6 +394,15 @@ async function createFlatZip(directory, outputPath) {
   await writeFile(outputPath, Buffer.from(zipSync(files, { level: 9 })));
 }
 
+async function createSingleFileZip(parentDirectory, fileName, outputPath) {
+  if (spawnSync('zip', ['-v'], { stdio: 'ignore' }).status === 0) {
+    run('zip', ['-0', '-q', outputPath, fileName], { cwd: parentDirectory });
+    return;
+  }
+  const contents = new Uint8Array(await readFile(join(parentDirectory, fileName)));
+  await writeFile(outputPath, Buffer.from(zipSync({ [fileName]: contents }, { level: 0 })));
+}
+
 async function verifyZip(filePath) {
   if (spawnSync('unzip', ['-v'], { stdio: 'ignore' }).status === 0) {
     run('unzip', ['-tqq', filePath]);
@@ -416,18 +444,24 @@ async function main() {
   const { sourceStageRoot } = await stageSource();
 
   const portableZip = join(releaseRoot, portableZipName);
+  const installerZip = join(releaseRoot, installerZipName);
   const sourceZip = join(releaseRoot, sourceZipName);
+  await removeWorkspaceCopyTemps(join(portableRoot, 'runtime'), 'node.exe');
+  await createSingleFileZip(releaseRoot, installerName, installerZip);
   await createZip(releaseRoot, portableName, portableZip);
   await createZip(sourceStageRoot, sourceFolderName, sourceZip);
+  await verifyZip(installerZip);
   await verifyZip(portableZip);
   await verifyZip(sourceZip);
   const installerStats = await stat(installer);
+  const installerZipStats = await stat(installerZip);
   const portableStats = await stat(portableZip);
   const sourceStats = await stat(sourceZip);
-  const checksums = `${await sha256(installer)}  ${installerName}\n${await sha256(portableZip)}  ${portableZipName}\n${await sha256(sourceZip)}  ${sourceZipName}\n`;
+  const checksums = `${await sha256(installerZip)}  ${installerZipName}\n${await sha256(installer)}  ${installerName}\n${await sha256(portableZip)}  ${portableZipName}\n${await sha256(sourceZip)}  ${sourceZipName}\n`;
   await writeFile(join(releaseRoot, 'SHA256SUMS.txt'), checksums);
 
   const files = await readdir(portableRoot, { withFileTypes: true });
+  console.log(`Built ${installerZipName} (${(installerZipStats.size / 1024 / 1024).toFixed(1)} MiB)`);
   console.log(`Built ${installerName} (${(installerStats.size / 1024 / 1024).toFixed(1)} MiB)`);
   console.log(`Built ${portableZipName} (${(portableStats.size / 1024 / 1024).toFixed(1)} MiB)`);
   console.log(`Built ${sourceZipName} (${(sourceStats.size / 1024 / 1024).toFixed(1)} MiB)`);

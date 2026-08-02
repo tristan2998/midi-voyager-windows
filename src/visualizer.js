@@ -21,9 +21,47 @@ function withAlpha(hex, alpha) {
   return `rgba(${number >> 16}, ${(number >> 8) & 255}, ${number & 255}, ${alpha})`;
 }
 
+export function aggregateSpectrumBands(values, bandCount = 64) {
+  const input = values || [];
+  const count = Math.max(1, Math.min(128, Math.round(Number(bandCount) || 64)));
+  const result = new Float32Array(count);
+  if (!input.length) return result;
+  for (let band = 0; band < count; band += 1) {
+    const start = Math.min(input.length - 1, Math.floor(Math.pow(input.length + 1, band / count) - 1));
+    const end = Math.max(start + 1, Math.min(input.length, Math.ceil(Math.pow(input.length + 1, (band + 1) / count) - 1)));
+    let energy = 0;
+    let peak = 0;
+    for (let index = Math.max(0, start); index < end; index += 1) {
+      const normalized = Math.max(0, Math.min(255, Number(input[index]) || 0)) / 255;
+      energy += normalized * normalized;
+      peak = Math.max(peak, normalized);
+    }
+    const rms = Math.sqrt(energy / Math.max(1, end - Math.max(0, start)));
+    result[band] = Math.min(1, rms * 0.72 + peak * 0.38);
+  }
+  return result;
+}
+
 export function activePianoKeyColor(pitch, noteColors, activeNotes = []) {
   if (noteColors?.has?.(pitch)) return noteColors.get(pitch);
   return activeNotes[pitch] ? PITCH_CLASS_COLORS[pitch % 12] : null;
+}
+
+export function visualizerTrackColor(trackIndex) {
+  const index = Number.isFinite(Number(trackIndex)) ? Math.trunc(Number(trackIndex)) : 0;
+  return CHANNEL_COLORS[((index % CHANNEL_COLORS.length) + CHANNEL_COLORS.length) % CHANNEL_COLORS.length];
+}
+
+export function mixerSliderColor(tracks, channel, colorMode = 'track') {
+  const channelIndex = Number.isFinite(Number(channel)) ? Math.trunc(Number(channel)) : 0;
+  if (colorMode === 'channel') {
+    return CHANNEL_COLORS[((channelIndex % CHANNEL_COLORS.length) + CHANNEL_COLORS.length) % CHANNEL_COLORS.length];
+  }
+  const primaryTrack = [...(tracks || [])].sort((left, right) =>
+    (Number(right.noteCount) || 0) - (Number(left.noteCount) || 0)
+      || (Number(left.index) || 0) - (Number(right.index) || 0)
+  )[0];
+  return visualizerTrackColor(primaryTrack?.index ?? channelIndex);
 }
 
 export class Visualizer {
@@ -39,6 +77,12 @@ export class Visualizer {
     this.showPiano = true;
     this.showLabels = true;
     this.showGrid = true;
+    this.spectrumTheme = 'classic';
+    this.spectrumGain = 1;
+    this.spectrumData = new Uint8Array(256);
+    this.waveformData = new Uint8Array(512).fill(128);
+    this.spectrumLevels = new Float32Array(64);
+    this.spectrumPeaks = new Float32Array(64);
     this.background = '#070a12';
     this.channelState = [];
     this.activeNotes = [];
@@ -72,6 +116,11 @@ export class Visualizer {
     this.zoom = clamp(Number(zoom) || 1, 0.25, 6);
   }
 
+  setAudioData(spectrum, waveform) {
+    if (spectrum?.length) this.spectrumData.set(spectrum.subarray ? spectrum.subarray(0, this.spectrumData.length) : spectrum);
+    if (waveform?.length) this.waveformData.set(waveform.subarray ? waveform.subarray(0, this.waveformData.length) : waveform);
+  }
+
   resize() {
     const rect = this.canvas.parentElement.getBoundingClientRect();
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -96,6 +145,10 @@ export class Visualizer {
     const ctx = this.context;
     ctx.fillStyle = this.background;
     ctx.fillRect(0, 0, width, height);
+    if (this.view === 'spectrum') {
+      this._drawSpectrum(ctx, width, height, time);
+      return;
+    }
     if (!this.model) {
       this._emptyState(ctx, width, height);
       return;
@@ -135,7 +188,7 @@ export class Visualizer {
       const key = this.analysis?.key;
       return keyPitchClasses(key).has(note.pitch % 12) ? '#54d8ff' : '#ff4f72';
     }
-    return CHANNEL_COLORS[note.track % CHANNEL_COLORS.length];
+    return visualizerTrackColor(note.track);
   }
 
   _isMuted(note) {
@@ -364,6 +417,104 @@ export class Visualizer {
     ctx.fillStyle = '#506171';
     ctx.font = '12px "Segoe UI", sans-serif';
     ctx.fillText(`${this.model.signatureAt(time).numerator}/${this.model.signatureAt(time).denominator}  ·  ${Math.round(bpm)} BPM`, width - 150, 26);
+  }
+
+  _drawSpectrum(ctx, width, height, time) {
+    const classic = this.spectrumTheme === 'classic';
+    const ice = this.spectrumTheme === 'ice';
+    const background = ctx.createLinearGradient(0, 0, 0, height);
+    background.addColorStop(0, classic ? '#020703' : '#03030d');
+    background.addColorStop(0.55, ice ? '#05051a' : '#020609');
+    background.addColorStop(1, '#000');
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    ctx.strokeStyle = classic ? '#36ff70' : '#48dfff';
+    ctx.lineWidth = 1;
+    for (let y = 56; y < height; y += 18) {
+      ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(width, y + 0.5); ctx.stroke();
+    }
+    for (let x = 0; x < width; x += 48) {
+      ctx.beginPath(); ctx.moveTo(x + 0.5, 54); ctx.lineTo(x + 0.5, height); ctx.stroke();
+    }
+    ctx.restore();
+
+    const bands = aggregateSpectrumBands(this.spectrumData, 64);
+    const headerHeight = Math.max(50, Math.min(72, height * 0.15));
+    const footerHeight = Math.max(36, Math.min(58, height * 0.12));
+    const baseline = height - footerHeight;
+    const usableHeight = Math.max(80, baseline - headerHeight - 8);
+    const gap = width > 900 ? 3 : 2;
+    const barWidth = Math.max(2, (width - gap * 65) / 64);
+    const left = Math.max(0, (width - (barWidth + gap) * 64 + gap) / 2);
+
+    const colorAt = (band, ratio) => {
+      if (this.spectrumTheme === 'rainbow') return `hsl(${(band / 64 * 300 + ratio * 55) % 360} 96% ${48 + ratio * 12}%)`;
+      if (ice) return ratio > 0.82 ? '#ff58ec' : ratio > 0.5 ? '#866cff' : '#35e9ff';
+      return ratio > 0.82 ? '#ff334f' : ratio > 0.56 ? '#ffe640' : '#32f46b';
+    };
+
+    for (let band = 0; band < 64; band += 1) {
+      const boosted = Math.min(1, bands[band] * Math.max(0.5, Number(this.spectrumGain) || 1) * 1.35);
+      const previous = this.spectrumLevels[band];
+      const level = boosted > previous ? boosted : previous * 0.87;
+      this.spectrumLevels[band] = level;
+      this.spectrumPeaks[band] = Math.max(level, this.spectrumPeaks[band] - 0.012);
+      const x = left + band * (barWidth + gap);
+      const barHeight = level * usableHeight;
+      const segmentHeight = Math.max(3, Math.min(7, usableHeight / 34));
+      for (let y = 0; y < barHeight; y += segmentHeight + 2) {
+        const ratio = y / usableHeight;
+        ctx.fillStyle = colorAt(band, ratio);
+        ctx.shadowColor = ctx.fillStyle;
+        ctx.shadowBlur = level > 0.55 ? 5 : 0;
+        ctx.fillRect(x, baseline - y - segmentHeight, barWidth, segmentHeight);
+      }
+      ctx.shadowBlur = 0;
+      const peakY = baseline - this.spectrumPeaks[band] * usableHeight;
+      ctx.fillStyle = colorAt(band, this.spectrumPeaks[band]);
+      ctx.fillRect(x, peakY - 2, barWidth, 2);
+
+      ctx.globalAlpha = 0.18;
+      ctx.fillStyle = colorAt(band, 0.15);
+      ctx.fillRect(x, baseline + 3, barWidth, Math.min(footerHeight - 8, barHeight * 0.18));
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = ice ? 'rgba(157,130,255,.72)' : 'rgba(88,230,255,.68)';
+    ctx.lineWidth = 1.4;
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.shadowBlur = 7;
+    ctx.beginPath();
+    for (let index = 0; index < this.waveformData.length; index += 1) {
+      const x = index / Math.max(1, this.waveformData.length - 1) * width;
+      const normalized = (this.waveformData[index] - 128) / 128;
+      const y = headerHeight + usableHeight * 0.48 + normalized * usableHeight * 0.18;
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = classic ? '#73ff91' : '#78eaff';
+    ctx.font = `700 ${Math.max(12, Math.min(17, width / 80))}px Consolas, monospace`;
+    ctx.fillText('MIDI VOYAGER // LIVE SPECTRUM', 16, 24);
+    ctx.fillStyle = classic ? '#b8ffbf' : '#c7f8ff';
+    ctx.font = `${Math.max(10, Math.min(13, width / 105))}px Consolas, monospace`;
+    const title = String(this.model?.fileName || 'NO SIGNAL').replace(/\.(mid|midi|kar|rmi|rmid|xmf)$/i, '').toUpperCase();
+    ctx.fillText(`▶ ${title.slice(0, Math.max(18, Math.floor(width / 12)))}`, 16, 45);
+    ctx.textAlign = 'right';
+    const bpm = this.model ? Math.round(this.model.tempoAt(time)) : 0;
+    ctx.fillText(`${formatTime(time)}  |  ${bpm || '---'} BPM  |  64-BAND`, width - 16, 45);
+    ctx.textAlign = 'left';
+
+    ctx.globalAlpha = 0.10;
+    ctx.fillStyle = '#fff';
+    for (let y = 1; y < height; y += 3) ctx.fillRect(0, y, width, 1);
+    ctx.globalAlpha = 1;
   }
 
   _drawHUD(ctx, width, time) {

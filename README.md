@@ -2,19 +2,20 @@
 
 MIDI Voyager Windows is a clean-room, 64-bit Windows MIDI workstation built from the feature behaviour of the supplied Android app. It uses the Windows WebView2 surface instead of bundling a full browser, performs synthesis in an audio worklet, and draws dense songs on an adaptive Canvas renderer.
 
-Version 1.1.1 adds a normal per-user Windows installer, Start Menu and optional desktop shortcuts, clean uninstall support, and Windows “Open with” integration for MIDI files. It also replaces the former icon variants with one Windows-themed MIDI Voyager icon throughout the EXE, taskbar and interface. Version 1.1.0 added the persistent SoundFont stack and matched piano-key colours.
+Version 1.2.0 adds an advanced SoundFont rack with preset inspection, bank offsets, soloing and live audition; a responsive Winamp-style spectrum analyser; and a non-destructive MIDI inspector/repair tool. It retains the verified ZIP-wrapped installer introduced in 1.1.3.
 
 ## Install on Windows
 
-1. Run `MIDI Voyager Windows Setup 1.1.1.exe`.
-2. Press **Install**. Administrator permission is not required.
-3. Launch it from the Start Menu or desktop shortcut.
+1. Download `MIDI Voyager Windows Setup 1.2.0.zip` and extract it.
+2. Run `MIDI Voyager Windows Setup 1.2.0.exe`.
+3. Press **Install**. Administrator permission is not required.
+4. Launch it from the Start Menu or desktop shortcut.
 
 The installer adds MIDI Voyager to Apps & Features and to Windows’ **Open with** menu for `.mid`, `.midi`, `.kar`, `.rmi`, `.rmid` and `.xmf` files without forcing it to become your default app. Right-click a MIDI file, choose **Open with**, then select MIDI Voyager Windows. A second file-open request is handed to the existing app window instead of starting a duplicate instance.
 
 ## Portable alternative
 
-1. Extract the complete `MIDI Voyager Windows 1.1.1 x64.zip` archive.
+1. Extract the complete `MIDI Voyager Windows 1.2.0 x64.zip` archive.
 2. Keep the `app`, `runtime`, and `ui` folders beside `MIDI Voyager Windows.exe`.
 3. Double-click `MIDI Voyager Windows.exe`.
 
@@ -23,8 +24,8 @@ Windows 11 includes Microsoft Edge WebView2. On Windows 10, install the current 
 ## Feature set
 
 - MIDI 0/1/2, KAR, RMID and XMF playback through a bundled GeneralUser GS bank
-- SF2, SF3 and DLS sound-bank stacking with persistent drag-and-drop priority and per-bank enable controls
-- Waterfall, piano-roll, staff, karaoke and event views
+- SF2, SF3 and DLS sound-bank rack with persistent priority, enable/solo controls, bank offsets, metadata, preset browsing and audition
+- Waterfall, piano-roll, staff, karaoke, event and Winamp-style spectrum views
 - Track/channel mixer with mute, solo, volume, pan, transpose and locked instruments
 - Tempo, pitch, seek, count-in, metronome, loop regions and named markers
 - Automatic chord and key analysis, lyric timing, signatures and tempo maps
@@ -32,6 +33,7 @@ Windows 11 includes Microsoft Edge WebView2. On Windows 10, install the current 
 - Windows installer, clean uninstall, shortcuts and Open-with file registration
 - USB MIDI input and external MIDI output where Web MIDI is available
 - Modified MIDI, offline WAV, and lyric/chord cue-sheet export
+- Non-destructive MIDI inspection and selectable repairs for stuck notes, overlaps, orphan note-offs, duplicates, tempo problems and track endings
 - Dense/Black MIDI safeguards, capped draw windows and off-interface-thread synthesis
 
 SFZ import and Android-only integrations are not included in this first Windows release. Convert SFZ banks to SF2/SF3 or DLS before loading them.
@@ -49,7 +51,8 @@ SFZ import and Android-only integrations are not included in this first Windows 
 | `Home` | Stop |
 | `[` / `]` | Transpose down / up |
 | `-` / `+` | Tempo down / up |
-| `1`–`5` | Switch visualisation |
+| `1`–`6` | Switch visualisation |
+| `Mouse wheel over visualiser` | Move backward / forward through the song |
 | `Ctrl+mouse wheel` | Zoom |
 
 ## Build from source
